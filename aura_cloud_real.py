@@ -2224,10 +2224,15 @@ def main():
     t.start()
     logging.info(f"API server on port {API_PORT}")
     logging.info(" AURA CLOUD V4")
-    try:
-        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-    except Exception as e:
-        logging.critical(f"FATAL: {e}\n{traceback.format_exc()}")
+    while True:
+        try:
+            import gc; gc.collect()
+            app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+        except Exception as e:
+            logging.critical(f"CRASH: {e}\n{traceback.format_exc()}")
+            import gc; gc.collect()
+            logging.info("Restarting in 5s...")
+            time.sleep(5)
 
 if __name__ == "__main__":
     main()
