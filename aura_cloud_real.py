@@ -2216,13 +2216,29 @@ def main():
     app.job_queue.run_repeating(radar_task, interval=RADAR_INTERVAL, first=10)
     app.job_queue.run_repeating(check_alerts, interval=60, first=30)
     app.job_queue.run_daily(daily_report, time=dt_time(hour=20, minute=0))
+
+    # Start API server and wait for it to be ready
+    import urllib.request
+    api_ready = threading.Event()
+    def start_api_and_signal():
+        start_api_server()
+        api_ready.set()
     pt = threading.Thread(target=_refresh_price_cache, daemon=True)
     pt.start()
     tt = threading.Thread(target=_track_loop, daemon=True)
     tt.start()
-    t = threading.Thread(target=start_api_server, daemon=True)
+    t = threading.Thread(target=start_api_and_signal, daemon=True)
     t.start()
-    logging.info(f"API server on port {API_PORT}")
+    for _ in range(20):
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{API_PORT}/health", timeout=2)
+            logging.info("API server ready")
+            break
+        except Exception:
+            time.sleep(0.5)
+    else:
+        logging.warning("API server may not be ready")
+
     logging.info(" AURA CLOUD V4")
     while True:
         try:
