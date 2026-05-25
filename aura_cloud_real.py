@@ -2224,23 +2224,10 @@ def main():
     t.start()
     logging.info(f"API server on port {API_PORT}")
     logging.info(" AURA CLOUD V4")
-    crash_count = 0
-    while True:
-        try:
-            crash_count = 0
-            import gc; gc.collect()
-            asyncio.set_event_loop(asyncio.new_event_loop())
-            app.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-            while app.updater.running:
-                time.sleep(1)
-        except Exception as e:
-            crash_count += 1
-            logging.critical(f"CRASH #{crash_count}: {e}\n{traceback.format_exc()}")
-            import gc; gc.collect()
-            if crash_count >= 3:
-                time.sleep(60)
-            logging.info("Restarting in 5s...")
-            time.sleep(5)
+    try:
+        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    except Exception as e:
+        logging.critical(f"FATAL: {e}\n{traceback.format_exc()}")
 
 if __name__ == "__main__":
     main()
