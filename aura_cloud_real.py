@@ -33,6 +33,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
                     handlers=[logging.FileHandler('aura.log'), logging.StreamHandler()])
 
 # ─── CONFIG ───
+DEFAULT_POSITION_SIZE = float(_env("POSITION_SIZE", "1000"))
 # Allow loading from .env even if env vars not set
 def _env(k, default=""):
     v = os.environ.get(k, "")
@@ -117,7 +118,13 @@ if GROQ_API_KEY:
     AI_PROVIDERS.append({"name": "groq", "base_url": "https://api.groq.com/openai/v1", "api_key": GROQ_API_KEY, "model": "llama-3.3-70b-versatile"})
 # 2) MiniMax M2.5 via OpenRouter — Fallback
 if BACKUP_API_KEY:
-    AI_PROVIDERS.append({"name": "minimax", "base_url": "https://openrouter.ai/api/v1", "api_key": BACKUP_API_KEY, "model": "minimax/minimax-m2.5:free"})
+    AI_PROVIDERS.append({"name": "minimax", "base_url": "https://openrouter.ai/api/v1", "api_key": BACKUP_API_KEY, "model": "minimax/minimax-m2.7"})
+# 3) DeepSeek via OpenRouter — Backup
+if BACKUP_API_KEY:
+    AI_PROVIDERS.append({"name": "deepseek", "base_url": "https://openrouter.ai/api/v1", "api_key": BACKUP_API_KEY, "model": "deepseek/deepseek-chat-v3-0324:free"})
+# 4) Gemini Flash via OpenRouter — Backup
+if BACKUP_API_KEY:
+    AI_PROVIDERS.append({"name": "gemini", "base_url": "https://openrouter.ai/api/v1", "api_key": BACKUP_API_KEY, "model": "google/gemini-2.0-flash-001"})
 _current_provider = 0
 _last_primary_check = 0
 _PRIMARY_CHECK_INTERVAL = 1800
@@ -148,14 +155,14 @@ def _ai_request(prompt, temperature=0.1, provider_idx=None, timeout=30.0):
                 _ai_clients_cache[ckey] = OpenAI(api_key=p["api_key"], base_url=p["base_url"], max_retries=2, timeout=timeout)
             c = _ai_clients_cache[ckey]
             r = c.chat.completions.create(model=p["model"],
-                messages=[{"role":"user","content":prompt}], temperature=temperature)
+                messages=[{"role":"user","content":prompt}], temperature=temperature, max_tokens=4096)
             if idx != _current_provider and provider_idx is None:
                 _current_provider = idx
                 logging.info(f"Switched AI provider → {p['name']}")
             return r
         except Exception as e:
             err = str(e).lower()
-            if "429" in err or "404" in err or "quota" in err or "rate limit" in err or "insufficient" in err or "not found" in err or "no endpoints" in err:
+            if "402" in err or "429" in err or "404" in err or "quota" in err or "rate limit" in err or "insufficient" in err or "not found" in err or "no endpoints" in err:
                 if provider_idx is not None:
                     errors.append(f"{p['name']}: {e}"); break
                 nxt = (idx + 1) % len(AI_PROVIDERS)
@@ -562,6 +569,10 @@ def build_signal_card(symbol, price, rsi, rec, strength, confidence, tp, sl, rr,
     if daily_rsi: lines += [f"RSI(1d): {daily_rsi}"]
     sent_mark = "(+)" if sentiment_score > 0.3 else ("(-)" if sentiment_score < -0.3 else "(=)")
     lines += [f"Sentiment: {sentiment_label} {sent_mark} {sentiment_score:+.1f}", sep]
+    if tp and sl: lines += [f"TP: {tp} | SL: {sl}"]
+    if rr: lines += [f"R/R: {rr}"]
+    if sup: lines += [f"Support: {sup}"]
+    if res: lines += [f"Resist: {res}"]
     if reason:
         r = reason.replace("*","").replace("_","").replace("`","").strip()
         if r: lines += [f"* {r[:200]}"]
@@ -1153,6 +1164,16 @@ def get_economic_calendar():
         return []
 
 # ─── SIGNAL LOG ───
+def calc_pnl(entry_price, exit_price, rec, position_size=None):
+    pos_size = position_size or DEFAULT_POSITION_SIZE
+    ep = float(entry_price); xp = float(exit_price)
+    if "شراء" in rec:
+        pnl_pct = (xp - ep) / ep * 100
+    else:
+        pnl_pct = (ep - xp) / ep * 100
+    pnl_usd = round(pnl_pct / 100 * pos_size, 2)
+    return round(pnl_pct, 2), pnl_usd
+
 def log_signal(symbol, rec, confidence, price, tp, sl, rr, sup, res, rsi, sentiment_label, sentiment_score, reason, sig_id=None, candle_patterns="", vol_note="", adx=None, session=""):
     entry = {"id": sig_id or f"{symbol}_{int(time.time())}", "time": datetime.now(timezone.utc).isoformat(), "asset": symbol, "rec": rec,
              "confidence": confidence, "price": price,
@@ -1161,7 +1182,7 @@ def log_signal(symbol, rec, confidence, price, tp, sl, rr, sup, res, rsi, sentim
              "status": "pending", "result_price": None, "result": None, "checked_at": None,
              "user_entered": False, "user_skipped": False, "user_confirmed_at": None,
              "notes": "", "tags": [], "entry_price": None, "exit_price": None, "exit_reason": "",
-             "ai_review": "",
+             "ai_review": "", "pnl_pct": None, "pnl_usd": None, "position_size": DEFAULT_POSITION_SIZE,
              "candle_patterns": candle_patterns,
              "vol_note": vol_note,
              "breakeven_set": False,
@@ -1284,8 +1305,12 @@ def track_active_trades():
                     elif sl_f and p >= sl_f:
                         s["exit_price"] = str(round(sl_f,5)); s["exit_reason"] = "sl_hit"; s["result"] = "loss"; hit = True; hit_type = "🛑 SL"; result = "💥 *خسارة*"
                 if hit:
+                    ep = float(s.get("entry_price") or s.get("price", 0))
+                    pnl_pct, pnl_usd = calc_pnl(ep, s["exit_price"], rec, s.get("position_size"))
+                    s["pnl_pct"] = pnl_pct; s["pnl_usd"] = pnl_usd
                     s["status"] = "checked"; s["result_price"] = s["exit_price"]; s["checked_at"] = now.isoformat(); closed += 1
-                    msg = f"{result}\n━━━━━━━━━━\n📊 *{asset}*\n💰 الدخول: {s.get('price','')}\n🚪 الخروج: {s['exit_price']}\n{hit_type}\n📈 الثقة: {s.get('confidence','')}%"
+                    sign = "+" if pnl_usd >= 0 else ""
+                    msg = f"{result}\n━━━━━━━━━━\n📊 *{asset}*\n💰 الدخول: {s.get('price','')}\n🚪 الخروج: {s['exit_price']}\n{hit_type}\n📊 P&L: {sign}${pnl_usd} ({sign}{pnl_pct}%)\n📈 الثقة: {s.get('confidence','')}%"
                     _send_tg(msg)
                     lesson = extract_lesson(s)
                     if lesson:
@@ -1499,7 +1524,7 @@ def generate_data_json(force=False):
     pf = round(wins / losses, 2) if losses else (wins if wins else 0)
     total_r = sum(abs(float(s.get("rr",0) or 0)) for s in checked if s.get("rr"))
     avg_rr = round(total_r / len([s for s in checked if s.get("rr")]), 2) if any(s.get("rr") for s in checked) else 0
-    returns = [1 if s.get("result")=="win" else (-abs(float(s.get("rr",1) or 1)) if s.get("result")=="loss" else 0) for s in checked]
+    returns = [s.get("pnl_usd", 0) or 0 for s in checked if s.get("result")]
     avg_ret = sum(returns)/len(returns) if returns else 0
     std_ret = (sum((r-avg_ret)**2 for r in returns)/len(returns))**0.5 if len(returns)>1 else 1
     sharpe = round(avg_ret/std_ret*252**0.5, 2) if std_ret else 0
@@ -1570,31 +1595,28 @@ def generate_data_json(force=False):
             elif s.get("result") == "loss": prov_stats[prov]["losses"] += 1
     behavior["provider_accuracy"] = {p: {"wins":d["wins"],"losses":d["losses"],"total":d["total"],
         "rate":round(d["wins"]/d["total"]*100,1) if d["total"] else 0} for p,d in prov_stats.items()}
-    # P&L per asset
+    # P&L per asset (real USD)
     pnl = {}
     for s in signal_log:
         a = s.get("asset","?")
         if a not in pnl: pnl[a] = {"wins":0,"losses":0,"total_pnl":0.0,"trades":0}
-        if s.get("status") == "checked":
+        if s.get("status") == "checked" and s.get("result"):
             pnl[a]["trades"] += 1
+            pnl_usd = s.get("pnl_usd") or 0
             if s.get("result") == "win":
                 pnl[a]["wins"] += 1
-                rr = abs(float(s.get("rr",1) or 1))
-                pnl[a]["total_pnl"] += rr
+                pnl[a]["total_pnl"] += abs(pnl_usd)
             elif s.get("result") == "loss":
                 pnl[a]["losses"] += 1
-                pnl[a]["total_pnl"] -= 1
+                pnl[a]["total_pnl"] -= abs(pnl_usd)
     behavior["pnl"] = {a: {"wins":d["wins"],"losses":d["losses"],"pnl":round(d["total_pnl"],2),"trades":d["trades"]} for a,d in pnl.items()}
-    # P&L cumulative history
+    # P&L cumulative history (real USD)
     pnl_history = []
     cum = 0
     for s in signal_log:
-        if s.get("status") == "checked":
-            if s.get("result") == "win":
-                rr = abs(float(s.get("rr",1) or 1))
-                cum += rr
-            elif s.get("result") == "loss":
-                cum -= 1
+        if s.get("status") == "checked" and s.get("result"):
+            pnl_usd = s.get("pnl_usd") or 0
+            cum += pnl_usd
             try:
                 t = datetime.fromisoformat(s.get("time","")).timestamp() * 1000
             except:
@@ -1826,6 +1848,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             s["result"] = "win" if cp > ep else "loss"
                         elif "بيع" in s.get("rec",""):
                             s["result"] = "win" if cp < ep else "loss"
+                        pnl_pct, pnl_usd = calc_pnl(ep, cp, s.get("rec",""), s.get("position_size"))
+                        s["pnl_pct"] = pnl_pct; s["pnl_usd"] = pnl_usd
                     found = True; break
             if found:
                 save_json('signals.json', signal_log)
@@ -2023,6 +2047,8 @@ class SignalAPIHandler(BaseHTTPRequestHandler):
                                     s["result"] = "win" if cp > ep else "loss"
                                 elif "بيع" in s.get("rec",""):
                                     s["result"] = "win" if cp < ep else "loss"
+                                pnl_pct, pnl_usd = calc_pnl(ep, cp, s.get("rec",""), s.get("position_size"))
+                                s["pnl_pct"] = pnl_pct; s["pnl_usd"] = pnl_usd
                             except Exception as e: logging.warning(f"API exit result: {e}")
                     else:
                         s["user_entered"] = False
@@ -2240,15 +2266,21 @@ def main():
         logging.warning("API server may not be ready")
 
     logging.info(" AURA CLOUD V4")
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+if __name__ == "__main__":
     while True:
         try:
-            import gc; gc.collect()
-            app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+            try:
+                asyncio.get_event_loop().close()
+            except:
+                pass
+            asyncio.set_event_loop(asyncio.new_event_loop())
+            main()
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except Exception as e:
             logging.critical(f"CRASH: {e}\n{traceback.format_exc()}")
             import gc; gc.collect()
             logging.info("Restarting in 5s...")
             time.sleep(5)
-
-if __name__ == "__main__":
-    main()
