@@ -103,7 +103,7 @@ PRICE_CACHE = load_json('price_cache.json', {}); PRICE_CACHE_TS = PRICE_CACHE.ge
 def _invalidate_cache(): global _DATA_CACHE, _DATA_CACHE_TS; _DATA_CACHE = None; _DATA_CACHE_TS = 0
 
 # ─── AI PROVIDERS ───
-BACKUP_API_KEY = _env("BACKUP_API_KEY", "")
+BACKUP_API_KEY = _env("BACKUP_API_KEY") or OPENROUTER_API_KEY
 AI_PROVIDERS = []
 _ai_clients_cache = {}
 _http_session = requests.Session()
