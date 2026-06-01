@@ -1,0 +1,11 @@
+run = "python aura_cloud_real.py"
+
+[nix]
+channel = "stable-24_05"
+
+[deployment]
+run = ["sh", "-c", "python aura_cloud_real.py"]
+
+[[ports]]
+localPort = 10993
+externalPort = 80
