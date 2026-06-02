@@ -1960,7 +1960,7 @@ async def unknown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── MAIN ───
 # ─── WEB API FOR MONITOR ───
-API_PORT = int(os.environ.get("PORT", 10993))
+API_PORT = 10993
 
 class SignalAPIHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args): pass
