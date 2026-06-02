@@ -55,6 +55,8 @@ NEWS_API_KEY = _env("NEWS_API_KEY")
 RADAR_CHAT_ID = int(_env("RADAR_CHAT_ID", "0"))
 BOT_PASSWORD = _env("BOT_PASSWORD", "aura2026")
 ADMIN_ID = int(_env("ADMIN_ID", str(RADAR_CHAT_ID)))
+OANDA_API_KEY = _env("OANDA_API_KEY", "")
+OANDA_ACCOUNT_ID = _env("OANDA_ACCOUNT_ID", "")
 GITHUB_TOKEN = _env("GITHUB_TOKEN", "")
 GITHUB_REPO = "mohammedbesmouch-byte/aura-monitor"
 FPS_API_KEY = _env("FPS_API_KEY", "")
@@ -234,6 +236,28 @@ def yahoo_symbol(s):
         return f"{s[:3]}{s[3:]}=X"
     return s
 
+def gold_api_price(symbol):
+    """Free spot gold price from gold-api.com (no key needed) + OANDA if available."""
+    # Gold-api.com for XAU/XAG
+    if symbol == "XAUUSD":
+        try:
+            r = requests.get("https://api.gold-api.com/price/XAU", timeout=8)
+            if r.status_code == 200:
+                return float(r.json().get("price", 0)), None
+        except: pass
+    # OANDA API (requires key + account ID)
+    if OANDA_API_KEY and OANDA_ACCOUNT_ID:
+        try:
+            oanda_sym = symbol[:3]+"_"+symbol[3:] if len(symbol)==6 else symbol
+            r = requests.get(f"https://api-fxpractice.oanda.com/v3/accounts/{OANDA_ACCOUNT_ID}/pricing?instruments={oanda_sym}",
+                headers={"Authorization": f"Bearer {OANDA_API_KEY}"}, timeout=8)
+            if r.status_code == 200:
+                d = r.json()
+                price = float(d["prices"][0]["closeoutBid"])
+                return price, None
+        except: pass
+    return None, "gold api error"
+
 def yahoo_price(symbol):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol(symbol)}"
@@ -315,6 +339,13 @@ def get_price(symbol):
     global price_cache, price_cache_time
     if now - price_cache_time < 55 and symbol in price_cache:
         return price_cache[symbol], None
+    # Try gold-api first for metals (XAU, XAG) — matches OANDA/TradingView spot
+    if symbol in ("XAUUSD", "XAGUSD"):
+        p, err = gold_api_price(symbol)
+        if not err:
+            price_cache[symbol] = p
+            price_cache_time = now
+            return p, None
     p, err = yahoo_price(symbol)
     if not err:
         price_cache[symbol] = p
