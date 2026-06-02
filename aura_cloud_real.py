@@ -555,7 +555,7 @@ def parse_signal(text):
     except Exception: pass
     return rec, strength, confidence, tp, sl, rr, sup, res, reason
 
-def build_signal_card(symbol, price, rsi, rec, strength, confidence, tp, sl, rr, sup, res, sentiment_label, sentiment_score, reason="", regime=None, daily_rsi=None):
+def build_signal_card(symbol, price, rsi, rec, strength, confidence, tp, sl, rr, sup, res, sentiment_label, sentiment_score, reason="", regime=None, daily_rsi=None, adx_val=None, candle_patterns="", vol_note="", session="", provider_used=""):
     rec_label = "[BUY]" if "شراء" in rec else ("[SELL]" if "بيع" in rec else "[WAIT]")
     rec_sign = "(+)" if "شراء" in rec else ("(-)" if "بيع" in rec else "(=)")
     sep = "="*16
@@ -566,16 +566,21 @@ def build_signal_card(symbol, price, rsi, rec, strength, confidence, tp, sl, rr,
         ri = {"trending":"📈","weak_trend":"📊","ranging":"📉"}.get(regime["trend"],"📊")
         di = {"up":"↑","down":"↓","flat":"→"}.get(regime["direction"],"→")
         lines += [f"Market: {ri} {regime['trend']} {di}"]
+    if adx_val: lines += [f"ADX: {adx_val}"]
     if daily_rsi: lines += [f"RSI(1d): {daily_rsi}"]
+    if session: lines += [f"Session: {session}"]
+    if candle_patterns: lines += [f"Patterns: {candle_patterns[:60]}"]
+    if vol_note: lines += [f"Vol: {vol_note[:40]}"]
     sent_mark = "(+)" if sentiment_score > 0.3 else ("(-)" if sentiment_score < -0.3 else "(=)")
     lines += [f"Sentiment: {sentiment_label} {sent_mark} {sentiment_score:+.1f}", sep]
     if tp and sl: lines += [f"TP: {tp} | SL: {sl}"]
     if rr: lines += [f"R/R: {rr}"]
     if sup: lines += [f"Support: {sup}"]
     if res: lines += [f"Resist: {res}"]
+    if provider_used: lines += [f"AI: {provider_used}"]
     if reason:
         r = reason.replace("*","").replace("_","").replace("`","").strip()
-        if r: lines += [f"* {r[:200]}"]
+        if r: lines += [f"* {r[:250]}"]
     return "\n".join(lines)
 
 def dynamic_confidence(rsi_val, sentiment_score, ai_conf, rec):
@@ -963,7 +968,7 @@ def analyze(symbol, ai_timeout=30.0):
         if high_vol and rec not in ("انتظار", "WAIT"):
             conf = min(100, conf + 5)
 
-        card = build_signal_card(symbol, price, rsi, rec, strength, conf, tp, sl, rr, sup, res, sentiment_label, sentiment_score, reason, regime=regime, daily_rsi=daily_rsi)
+        card = build_signal_card(symbol, price, rsi, rec, strength, conf, tp, sl, rr, sup, res, sentiment_label, sentiment_score, reason, regime=regime, daily_rsi=daily_rsi, adx_val=adx_val, candle_patterns=', '.join(candle_patterns) if candle_patterns else "", vol_note=vol_note, session=session_str, provider_used=AI_PROVIDERS[_current_provider]["name"] if AI_PROVIDERS else "")
         cp_str = ', '.join(candle_patterns) if candle_patterns else ""
         return card, conf, rec, price, tp, sl, rr, sup, res, rsi, sentiment_label, sentiment_score, reason, cp_str, vol_note, adx_val, session_str
     except Exception as e:
@@ -1056,7 +1061,7 @@ def fast_analyze(symbol):
     if rec != "انتظار" and regime["trend"] == "trending": conf = min(95, conf + 15)
     if high_impact: conf = max(30, conf - 10)
     sentiment_score, sentiment_label = 0, "[NEU]"
-    card = build_signal_card(symbol, price, rsi, rec, "", conf, tp, sl, rr, sup, res, sentiment_label, sentiment_score, reason, regime=regime, daily_rsi=daily_rsi)
+    card = build_signal_card(symbol, price, rsi, rec, "", conf, tp, sl, rr, sup, res, sentiment_label, sentiment_score, reason, regime=regime, daily_rsi=daily_rsi, adx_val=adx_result[0] if adx_result else None, candle_patterns=', '.join(candle_patterns), vol_note=vol_note, session=session_str, provider_used="تحليل فني سريع")
     return card, conf, rec, price, tp, sl, rr, sup, res, rsi, sentiment_label, sentiment_score, reason, ', '.join(candle_patterns), vol_note, adx_result[0] if adx_result else None, session_str
 
 def analyze_web(symbol):
@@ -2216,14 +2221,13 @@ async def notes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def provider_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
         authorized_users.add(update.effective_user.id); save_json('users.json', list(authorized_users))
-    p = AI_PROVIDERS[_current_provider]
-    txt = f"[⚡] *مزود AI الحالي:* `{p['name']}`\nموديل: `{p['model']}`\n"
-    if len(AI_PROVIDERS) > 1:
-        txt += f"\n[*] الاحتياطي: `{AI_PROVIDERS[1]['name']}` ({AI_PROVIDERS[1]['model']})"
-        if _current_provider == 0:
-            txt += "\n✅ الأساسي يعمل"
-        else:
-            txt += "\n⚠️ على الاحتياطي — الأساسي مستنفذ"
+    txt = "[*] *مزودي AI*\n───────────\n"
+    for i, p in enumerate(AI_PROVIDERS):
+        mark = "✅" if i == _current_provider else "○"
+        status = "⚠️ مستنفذ" if i < _current_provider else "جاهز"
+        if i == 0 and _current_provider == 0: status = "يعمل"
+        txt += f"{mark} {p['name']}: `{p['model']}` — {status}\n"
+    txt += f"\n[*] الحالي: `{AI_PROVIDERS[_current_provider]['name']}` ({AI_PROVIDERS[_current_provider]['model']})"
     await update.message.reply_text(txt, parse_mode="Markdown")
 
 async def daily_report(context):
