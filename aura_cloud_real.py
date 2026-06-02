@@ -1437,7 +1437,15 @@ def generate_monitor_html():
         with open('monitor.html', 'r', encoding='utf-8') as f:
             return f.read()
     except:
-        return """<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><title>AURA CLOUD</title></head><body><h1>= AURA CLOUD</h1><p style="color:#666">صفحة المراقبة قيد التحميل...</p><script>window.location.href="https://mohammedbesmouch-byte.github.io/aura-monitor/"</script></body></html>"""
+        try:
+            r = requests.get("https://raw.githubusercontent.com/mohammedbesmouch-byte/aura-cloud/main/monitor.html", timeout=10)
+            if r.status_code == 200:
+                with open('monitor.html', 'w', encoding='utf-8') as f:
+                    f.write(r.text)
+                return r.text
+        except:
+            pass
+        return """<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><title>AURA CLOUD</title></head><body><h1>= AURA CLOUD</h1><p style="color:#666">جاري التوجيه...</p><script>window.location.href="https://mohammedbesmouch-byte.github.io/aura-monitor/"</script></body></html>"""
 
 # ─── GITHUB PUSH ───
 def push_to_github(filename, content_bytes, commit_msg):
@@ -1981,7 +1989,7 @@ class SignalAPIHandler(BaseHTTPRequestHandler):
                 with open("monitor.html", "rb") as _f:
                     self.wfile.write(_f.read())
             except FileNotFoundError:
-                self.wfile.write(b"\xef\xbb\xbf<h1>monitor.html not found</h1>")
+                self.wfile.write(b"<html><head><meta charset='UTF-8'><meta http-equiv='refresh' content='0;url=https://mohammedbesmouch-byte.github.io/aura-monitor/'></head><body><p>جاري التوجيه...</p></body></html>")
         elif path == "/data.json":
             self.send_response(200)
             self._cors()
@@ -1998,7 +2006,7 @@ class SignalAPIHandler(BaseHTTPRequestHandler):
                 with open("monitor.html", "rb") as _f:
                     self.wfile.write(_f.read())
             except FileNotFoundError:
-                self.wfile.write(b"\xef\xbb\xbf<h1>monitor.html not found on server</h1>")
+                self.wfile.write(b"<html><head><meta charset='UTF-8'><meta http-equiv='refresh' content='0;url=https://mohammedbesmouch-byte.github.io/aura-monitor/'></head><body><p>جاري التوجيه لوحة المراقبة...</p></body></html>")
         elif path == "/api/scan":
             self._json({"ok": True, "assets": market_scan()})
         elif path == "/api/prices":
