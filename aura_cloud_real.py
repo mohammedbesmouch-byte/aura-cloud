@@ -2222,11 +2222,16 @@ async def daily_report(context):
     if RADAR_CHAT_ID:
         await context.bot.send_message(chat_id=RADAR_CHAT_ID, text=msg, parse_mode="Markdown")
 
-class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer): pass
+class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
 def start_api_server():
-    httpd = ThreadedHTTPServer(("0.0.0.0", API_PORT), SignalAPIHandler)
-    logging.info(f"API server on port {API_PORT}")
-    httpd.serve_forever()
+    try:
+        httpd = ThreadedHTTPServer(("0.0.0.0", API_PORT), SignalAPIHandler)
+        logging.info(f"API server on port {API_PORT}")
+        httpd.serve_forever()
+    except Exception as e:
+        logging.error(f"API server failed: {e}")
 
 # ─── MAIN ───
 def main():
