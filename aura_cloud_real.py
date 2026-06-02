@@ -227,7 +227,7 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 # ─── API HELPERS ───
-YAHOO_MAP = {"XAUUSD":"XAUUSD=X","XAGUSD":"XAGUSD=X","BTCUSD":"BTC-USD","ETHUSD":"ETH-USD","XRPUSD":"XRP-USD","LTCUSD":"LTC-USD"}
+YAHOO_MAP = {"XAUUSD":"GC=F","XAGUSD":"SI=F","BTCUSD":"BTC-USD","ETHUSD":"ETH-USD","XRPUSD":"XRP-USD","LTCUSD":"LTC-USD"}
 
 def yahoo_symbol(s):
     if s in YAHOO_MAP:
