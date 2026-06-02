@@ -237,15 +237,16 @@ def yahoo_symbol(s):
     return s
 
 def gold_api_price(symbol):
-    """Free spot gold price from gold-api.com (no key needed) + OANDA if available."""
-    # Gold-api.com for XAU/XAG
-    if symbol == "XAUUSD":
+    """Free spot metal prices from gold-api.com (no key needed) + OANDA if available."""
+    METAL_MAP = {"XAUUSD":"XAU","XAGUSD":"XAG","XPTUSD":"XPT","XPDUSD":"XPD"}
+    metal = METAL_MAP.get(symbol)
+    if metal:
         try:
-            r = requests.get("https://api.gold-api.com/price/XAU", timeout=8)
+            r = requests.get(f"https://api.gold-api.com/price/{metal}", timeout=8)
             if r.status_code == 200:
                 return float(r.json().get("price", 0)), None
         except: pass
-    # OANDA API (requires key + account ID)
+    # OANDA API (requires key + account ID) — works for ALL pairs
     if OANDA_API_KEY and OANDA_ACCOUNT_ID:
         try:
             oanda_sym = symbol[:3]+"_"+symbol[3:] if len(symbol)==6 else symbol
@@ -253,8 +254,7 @@ def gold_api_price(symbol):
                 headers={"Authorization": f"Bearer {OANDA_API_KEY}"}, timeout=8)
             if r.status_code == 200:
                 d = r.json()
-                price = float(d["prices"][0]["closeoutBid"])
-                return price, None
+                return float(d["prices"][0]["closeoutBid"]), None
         except: pass
     return None, "gold api error"
 
@@ -339,8 +339,9 @@ def get_price(symbol):
     global price_cache, price_cache_time
     if now - price_cache_time < 55 and symbol in price_cache:
         return price_cache[symbol], None
-    # Try gold-api first for metals (XAU, XAG) — matches OANDA/TradingView spot
-    if symbol in ("XAUUSD", "XAGUSD"):
+    # Try free metal API for precious metals first (matches OANDA/TradingView spot)
+    METAL_PAIRS = {"XAUUSD","XAGUSD","XPTUSD","XPDUSD"}
+    if symbol in METAL_PAIRS:
         p, err = gold_api_price(symbol)
         if not err:
             price_cache[symbol] = p
