@@ -2044,15 +2044,9 @@ class SignalAPIHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path.rstrip("/")
         if path == "" or path == "/":
-            self.send_response(200)
-            self._cors()
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_response(302)
+            self.send_header("Location", "https://mohammedbesmouch-byte.github.io/aura-monitor/")
             self.end_headers()
-            try:
-                with open("monitor.html", "rb") as _f:
-                    self.wfile.write(_f.read())
-            except FileNotFoundError:
-                self.wfile.write(b"<html><head><meta charset='UTF-8'><meta http-equiv='refresh' content='0;url=https://mohammedbesmouch-byte.github.io/aura-monitor/'></head><body><p>جاري التوجيه...</p></body></html>")
         elif path == "/data.json":
             self.send_response(200)
             self._cors()
@@ -2069,7 +2063,7 @@ class SignalAPIHandler(BaseHTTPRequestHandler):
                 with open("monitor.html", "rb") as _f:
                     self.wfile.write(_f.read())
             except FileNotFoundError:
-                self.wfile.write(b"<html><head><meta charset='UTF-8'><meta http-equiv='refresh' content='0;url=https://mohammedbesmouch-byte.github.io/aura-monitor/'></head><body><p>جاري التوجيه لوحة المراقبة...</p></body></html>")
+                self.wfile.write("<html><head><meta charset='UTF-8'><meta http-equiv='refresh' content='0;url=https://mohammedbesmouch-byte.github.io/aura-monitor/'></head><body><p>جاري التوجيه لوحة المراقبة...</p></body></html>".encode("utf-8"))
         elif path == "/api/scan":
             self._json({"ok": True, "assets": market_scan()})
         elif path == "/api/prices":
