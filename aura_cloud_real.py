@@ -225,7 +225,7 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 # ─── API HELPERS ───
-YAHOO_MAP = {"XAUUSD":"GC=F","XAGUSD":"SI=F","BTCUSD":"BTC-USD","ETHUSD":"ETH-USD","XRPUSD":"XRP-USD","LTCUSD":"LTC-USD"}
+YAHOO_MAP = {"XAUUSD":"XAUUSD=X","XAGUSD":"XAGUSD=X","BTCUSD":"BTC-USD","ETHUSD":"ETH-USD","XRPUSD":"XRP-USD","LTCUSD":"LTC-USD"}
 
 def yahoo_symbol(s):
     if s in YAHOO_MAP:
@@ -781,11 +781,12 @@ def analyze(symbol, ai_timeout=30.0):
         sent_prompt = f"حلل المشاعر للأخبار التالية وأعط رقماً بين -1 و +1 (بدون تفسير):\n{chr(10).join('- '+h for h in headlines)}"
 
         provider_names = {p["name"]: i for i, p in enumerate(AI_PROVIDERS)}
+        ALL_PROVIDERS = ["groq", "minimax", "deepseek", "gemini"]
 
-        # Step 1: Independent analysis from BOTH providers (Multi-AI)
+        # Step 1: Independent analysis from ALL providers (Multi-AI voting)
         tech_texts = {}; tech_recs = {}
         for attempt in range(2):
-            for tp in ["groq", "minimax"]:
+            for tp in ALL_PROVIDERS:
                 if tp in provider_names:
                     try:
                         r1 = _ai_request(tech_prompt, temperature=0.1, provider_idx=provider_names[tp], timeout=ai_timeout)
@@ -802,15 +803,18 @@ def analyze(symbol, ai_timeout=30.0):
                         continue
             if tech_texts: break
             time.sleep(4)
-        # Multi-AI confirmation: if both agree, boost confidence; if disagree, be conservative
+        # Multi-AI voting: all providers vote
         groq_rec = tech_recs.get("groq", "")
         mm_rec = tech_recs.get("minimax", "")
-        tech_text = tech_texts.get("groq") or tech_texts.get("minimax") or ""
-        multi_agreement = False
-        if groq_rec and mm_rec:
-            groq_dir = "شراء" if "شراء" in groq_rec else ("بيع" if "بيع" in groq_rec else "انتظار")
-            mm_dir = "شراء" if "شراء" in mm_rec else ("بيع" if "بيع" in mm_rec else "انتظار")
-            multi_agreement = groq_dir == mm_dir
+        ds_rec = tech_recs.get("deepseek", "")
+        gm_rec = tech_recs.get("gemini", "")
+        tech_text = tech_texts.get("groq") or tech_texts.get("minimax") or tech_texts.get("deepseek") or tech_texts.get("gemini") or ""
+        # Count votes for each direction
+        votes_buy = sum(1 for r in [groq_rec, mm_rec, ds_rec, gm_rec] if "شراء" in r)
+        votes_sell = sum(1 for r in [groq_rec, mm_rec, ds_rec, gm_rec] if "بيع" in r)
+        total_voted = votes_buy + votes_sell
+        majority_dir = "شراء" if votes_buy > votes_sell else ("بيع" if votes_sell > votes_buy else "")
+        all_agree = (total_voted == 4 and (votes_buy == 4 or votes_sell == 4))
 
         # Step 2: Sentiment (try MiniMax, fallback to Groq)
         sent_text = ""
@@ -833,22 +837,29 @@ def analyze(symbol, ai_timeout=30.0):
 
         # Step 3: Decision (Groq, with Multi-AI context)
         if "groq" in provider_names and tech_text:
-            agreement_note = ""
-            if groq_rec and mm_rec:
-                if multi_agreement:
-                    agreement_note = f"\n✅ كلا المزودين (Groq + MiniMax) متفقان على {groq_dir}"
-                else:
-                    agreement_note = f"\n⚠️ تعارض: Groq يقول {groq_rec} و MiniMax يقول {mm_rec} — كن حذراً"
-            decision_prompt = f"""لديك تحليلين للأصل {symbol}:
-
-التحليل الفني (Groq):
-{tech_texts.get('groq','')[:1000]}
-التحليل الفني (MiniMax):
-{tech_texts.get('minimax','')[:1000]}{agreement_note}
-
+            # Build voting summary
+            votes_str = []
+            for name, rec in [("Groq", groq_rec), ("MiniMax", mm_rec), ("DeepSeek", ds_rec), ("Gemini", gm_rec)]:
+                if rec: votes_str.append(f"{name}: {rec}")
+            vote_summary = "\n".join(votes_str) if votes_str else "لا يوجد تصويت"
+            if all_agree and majority_dir:
+                agreement_note = f"\n✅ جميع المزودين الأربعة متفقون → {majority_dir}"
+            elif total_voted >= 3:
+                pct = max(votes_buy, votes_sell) / total_voted * 100
+                agreement_note = f"\n📊 تصويت {total_voted}/4: {int(pct)}% لـ {majority_dir}"
+            else:
+                agreement_note = "\n⚠️ آراء متفرقة — كن حذراً"
+            provider_analyses = ""
+            for tp in ALL_PROVIDERS:
+                if tp in tech_texts:
+                    label = tp.capitalize()
+                    provider_analyses += f"\n--- {label} ---\n{tech_texts[tp][:500]}\n"
+            decision_prompt = f"""لديك تحليلات للأصل {symbol} من 4 مزودين:
+{provider_analyses}
+التصويت:
+{vote_summary}{agreement_note}
 تحليل المشاعر:
 {sent_text if sent_text else f"{sentiment_label} ({sentiment_score:+.1f})"}
-
 البيانات الأصلية:
 - السعر: {price}
 - RSI 15m: {rsi or 'N/A'}
@@ -856,8 +867,7 @@ def analyze(symbol, ai_timeout=30.0):
 - RSI يومي: {daily_rsi or 'N/A'}
 - حالة السوق: {regime['trend']} / {regime['direction']}
 - الجلسة: {session_str}
-
-بناءً على التحليلين معاً، اتخذ قراراً نهائياً. أجب بصيغة JSON فقط:
+بناءً على جميع التحليلات معاً، اتخذ قراراً نهائياً. أجب بصيغة JSON فقط:
 {{"recommendation": "شراء/بيع/انتظار", "confidence": 85, "tp": {price}, "sl": {price}, "risk_reward": 2.0, "support": {price},"resistance": {price},"reason": "..."}}"""
             for attempt3 in range(2):
                 try:
@@ -888,10 +898,15 @@ def analyze(symbol, ai_timeout=30.0):
             logging.warning(f"JSON parse failed for {symbol}, falling back to regex")
             rec, strength, ai_conf, tp, sl, rr, sup, res, reason = parse_signal(ai)
 
-        # Multi-AI: if providers disagree and rec is not WAIT, lower confidence
-        if groq_rec and mm_rec and not multi_agreement and rec not in ("انتظار", "WAIT"):
-            ai_conf = int(ai_conf * 0.6)
-            reason = (reason + " [تعارض المزودين]").strip()
+        # Multi-AI voting adjustment
+        if total_voted >= 3 and not all_agree and rec not in ("انتظار", "WAIT"):
+            conflict_ratio = min(votes_buy, votes_sell) / max(votes_buy, votes_sell) if max(votes_buy, votes_sell) else 1
+            if conflict_ratio > 0.3:
+                ai_conf = int(ai_conf * 0.6)
+                reason = (reason + f" [تصويت {max(votes_buy,votes_sell)}/{total_voted}]").strip()
+        if all_agree and rec not in ("انتظار", "WAIT"):
+            ai_conf = min(100, ai_conf + 15)
+            reason = (reason + " [إجماع 4/4]").strip()
 
         # Provider-based confidence adjustment
         try:
