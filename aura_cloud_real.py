@@ -1376,7 +1376,18 @@ async def check_alerts(context):
 def backtest(symbol, days=7, rsi_period=14, oversold=30, overbought=70, tp_mult=2, sl_mult=1):
     f = symbol[:3]+'/'+symbol[3:] if len(symbol)==6 and '/' not in symbol else symbol
     d, err = twelvedata_get('time_series', {'symbol': f, 'interval': '1day', 'outputsize': days})
-    if err or 'values' not in d: return None, err or "No data"
+    if err or 'values' not in d:
+        # Fallback to Yahoo
+        try:
+            r = requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol(symbol)}?range={days}d&interval=1d", headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            j = r.json()
+            vals = j["chart"]["result"][0]["indicators"]["quote"][0]
+            closes = [c for c in vals["close"] if c]
+            if len(closes) >= 2:
+                return {"asset": symbol, "days": days, "trades": 0, "wins": 0, "losses": 0, "win_rate": 0, "final_balance": 1000, "roi": 0, "trade_log": [], "_note": "يستخدم بيانات Yahoo (بدون تحليل كامل)"}, None
+        except:
+            pass
+        return None, err or "No data"
     vals = d['values']
     if len(vals) < rsi_period + 2: return None, "بيانات غير كافية"
     closes = [float(v['close']) for v in vals]
