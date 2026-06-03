@@ -33,7 +33,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
                     handlers=[logging.FileHandler('aura.log'), logging.StreamHandler()])
 
 # ─── CONFIG ───
-DEFAULT_POSITION_SIZE = float(_env("POSITION_SIZE", "1000"))
 # Allow loading from .env even if env vars not set
 def _env(k, default=""):
     v = os.environ.get(k, "")
@@ -47,6 +46,8 @@ def _env(k, default=""):
                         break
         except: pass
     return v or default
+
+DEFAULT_POSITION_SIZE = float(_env("POSITION_SIZE", "1000"))
 
 TELEGRAM_BOT_TOKEN = _env("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = _env("OPENROUTER_API_KEY")
@@ -171,9 +172,11 @@ def _ai_request(prompt, temperature=0.1, provider_idx=None, timeout=30.0):
                 if nxt != idx:
                     _current_provider = nxt
                     logging.warning(f"Provider {p['name']} ({p['model']}) → {err[:80]} → switching to {AI_PROVIDERS[nxt]['name']}")
+                time.sleep(4)
                 continue
             errors.append(f"{p['name']}: {e}")
             if i < loop_count - 1:
+                time.sleep(2)
                 continue
             break
     raise Exception(f"AI all failed: {' | '.join(errors)}")
@@ -703,21 +706,15 @@ def _build_analysis_prompt(symbol, price, rsi, hr_rsi, daily_rsi, regime, headli
     pivot_note = f"\n- Pivot: {pivots['pp']} | R1: {pivots['r1']} R2: {pivots['r2']} | S1: {pivots['s1']} S2: {pivots['s2']}" if pivots else ""
     ma_note = f"\n- SMA50: {sma_50} | EMA20: {ema_20}" if sma_50 or ema_20 else ""
 
-    few_shot = """أمثلة على التنسيق المطلوب:
+    few_shot = """رد فقط بصيغة JSON صالحة (بدون markdown, بدون ```, بدون نص إضافي):
+{"recommendation": "شراء/بيع/انتظار", "confidence": 0-100, "tp": float or null, "sl": float or null, "risk_reward": float or null, "support": float or null, "resistance": float or null, "reason": "..."}
 
-مثال 1 - شراء قوي (تأكيد متعدد الفريمات):
-{"recommendation": "شراء","confidence": 85,"tp": 1.0875,"sl": 1.0835,"risk_reward": 1.7,"support": 1.0820,"resistance": 1.0900,"reason": "RSI 15m 28 + RSI ساعي 32 = ذروة بيع في فريمين. ADX 28 (trending). ارتداد من دعم رئيسي. MACD يعطي إشارة شراء. حجم التداول مرتفع."}
+ملاحظات التنسيق: recommendation يجب أن تكون "شراء" أو "بيع" أو "انتظار" فقط. confidence رقم من 0 إلى 100. وقتها null إذا ما في إشارة.
 
-مثال 2 - بيع (تباعد سلبي):
-{"recommendation": "بيع","confidence": 80,"tp": 150.20,"sl": 150.80,"risk_reward": 2.0,"support": 149.50,"resistance": 151.00,"reason": "RSI 15m 75 مع تباعد سلبي على فريم الساعة. Stochastic في ذروة شراء (88). السوق trending مع ADX 32. نموذج Doji بعد قمة."}
-
-مثال 3 - انتظار (تضارب):
-{"recommendation": "انتظار","confidence": 50,"tp": null,"sl": null,"risk_reward": null,"support": null,"resistance": null,"reason": "لا توجد إشارة واضحة. RSI 54 (محايد). ADX 12 (سوق متذبذب). لا يوجد نمط شمعة واضح. MACD متقاطع عرضي."}
-
-مثال 4 - شراء حذر (سوق متذبذب):
-{"recommendation": "شراء","confidence": 60,"tp": 1.0920,"sl": 1.0900,"risk_reward": 1.2,"support": 1.0895,"resistance": 1.0930,"reason": "RSI اليومي 33 (دعم طويل المدى) لكن ADX 13 (متذبذب). نشتري قرب الدعم مع SL ضيق."}
-
-الآن قم بتحليل البيانات التالية وأعد JSON فقط (بدون أي نص إضافي):"""
+أمثلة:
+- شراء قوي: {"recommendation": "شراء","confidence": 85,"tp": 1.0875,"sl": 1.0835,"risk_reward": 1.7,"support": 1.0820,"resistance": 1.0900,"reason": "RSI 15m 28 + RSI ساعي 32 = ذروة بيع في فريمين. ADX 28 (trending). ارتداد من دعم."}
+- بيع: {"recommendation": "بيع","confidence": 80,"tp": 150.20,"sl": 150.80,"risk_reward": 2.0,"support": 149.50,"resistance": 151.00,"reason": "RSI 15m 75 مع تباعد سلبي. Stochastic 88. ADX 32."}
+- انتظار: {"recommendation": "انتظار","confidence": 50,"tp": null,"sl": null,"risk_reward": null,"support": null,"resistance": null,"reason": "RSI 54 محايد. ADX 12 (متذبذب). لا يوجد نمط واضح."}"""
 
     return f"""{few_shot}
 
@@ -825,7 +822,8 @@ def analyze(symbol, ai_timeout=30.0):
                         txt = r1.choices[0].message.content.strip()
                         tech_texts[tp] = txt
                         try:
-                            clean = re.sub(r'```(?:json)?\s*', '', txt).strip()
+                            clean = re.sub(r'^.*?({.*})[^}]*$', r'\1', txt.strip(), flags=re.DOTALL)
+                            clean = re.sub(r'```(?:json)?\s*|\s*```', '', clean).strip()
                             p = json.loads(clean) if clean.startswith('{') else json.loads(re.search(r'\{.*\}', clean, re.DOTALL).group())
                             tech_recs[tp] = p.get("recommendation", "انتظار")
                         except:
@@ -916,7 +914,8 @@ def analyze(symbol, ai_timeout=30.0):
 
         strength = ""
         try:
-            clean = re.sub(r'```(?:json)?\s*', '', ai).strip()
+            clean = re.sub(r'^.*?({.*})[^}]*$', r'\1', ai.strip(), flags=re.DOTALL)
+            clean = re.sub(r'```(?:json)?\s*|\s*```', '', clean).strip()
             parsed = json.loads(clean) if clean.startswith('{') else json.loads(re.search(r'\{.*\}', clean, re.DOTALL).group())
             rec = parsed.get("recommendation", "انتظار")
             ai_conf = int(parsed.get("confidence", 50))
@@ -2336,21 +2335,28 @@ def main():
         logging.warning("API server may not be ready")
 
     logging.info(" AURA CLOUD V4")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    try:
+        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    finally:
+        try: app.stop()
+        except: pass
 
 if __name__ == "__main__":
+    restart_delay = 5
     while True:
         try:
-            try:
-                asyncio.get_event_loop().close()
-            except:
-                pass
+            try: asyncio.get_event_loop().close()
+            except: pass
             asyncio.set_event_loop(asyncio.new_event_loop())
             main()
+            restart_delay = 5
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as e:
-            logging.critical(f"CRASH: {e}\n{traceback.format_exc()}")
+            err = str(e).lower()
+            if "conflict" in err:
+                restart_delay = 15
+            logging.critical(f"CRASH [{restart_delay}s]: {e}\n{traceback.format_exc()}")
             import gc; gc.collect()
-            logging.info("Restarting in 5s...")
-            time.sleep(5)
+            time.sleep(restart_delay)
+            restart_delay = min(restart_delay + 5, 30)
