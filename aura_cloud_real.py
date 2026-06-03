@@ -46,7 +46,6 @@ def _env(k, default=""):
                         break
         except: pass
     return v or default
-
 DEFAULT_POSITION_SIZE = float(_env("POSITION_SIZE", "1000"))
 
 TELEGRAM_BOT_TOKEN = _env("TELEGRAM_BOT_TOKEN")
@@ -131,6 +130,33 @@ if BACKUP_API_KEY:
 _current_provider = 0
 _last_primary_check = 0
 _PRIMARY_CHECK_INTERVAL = 1800
+
+# ─── MODEL ROUTING ───
+def get_model_for_task(task_type="deep"):
+    """
+    Returns provider index for a given task type.
+      deep      → DeepSeek  (comprehensive multi-AI analysis)
+      fast      → Groq      (single fast analysis)
+      sentiment → MiniMax   (sentiment-focused analysis)
+    Falls back to index 0 if requested provider not configured.
+    """
+    mapping = {"deep": "deepseek", "fast": "groq", "sentiment": "minimax"}
+    target = mapping.get(task_type, "groq")
+    for i, p in enumerate(AI_PROVIDERS):
+        if p["name"] == target:
+            return i
+    return 0
+
+TASK_PROVIDERS = {
+    "deep":      ["groq", "minimax", "deepseek", "gemini"],  # all vote
+    "fast":      ["groq"],                                    # Groq only
+    "sentiment": ["minimax", "groq"],                         # MiniMax primary
+}
+TASK_DECIDER = {
+    "deep":      "deepseek",   # DeepSeek makes final call
+    "fast":      "groq",       # Groq makes final call
+    "sentiment": "minimax",    # MiniMax makes final call
+}
 # Learning system: stores lessons from past trades
 lessons_log = load_json('lessons.json', [])
 MAX_LESSONS = 50
@@ -172,11 +198,9 @@ def _ai_request(prompt, temperature=0.1, provider_idx=None, timeout=30.0):
                 if nxt != idx:
                     _current_provider = nxt
                     logging.warning(f"Provider {p['name']} ({p['model']}) → {err[:80]} → switching to {AI_PROVIDERS[nxt]['name']}")
-                time.sleep(4)
                 continue
             errors.append(f"{p['name']}: {e}")
             if i < loop_count - 1:
-                time.sleep(2)
                 continue
             break
     raise Exception(f"AI all failed: {' | '.join(errors)}")
@@ -706,15 +730,21 @@ def _build_analysis_prompt(symbol, price, rsi, hr_rsi, daily_rsi, regime, headli
     pivot_note = f"\n- Pivot: {pivots['pp']} | R1: {pivots['r1']} R2: {pivots['r2']} | S1: {pivots['s1']} S2: {pivots['s2']}" if pivots else ""
     ma_note = f"\n- SMA50: {sma_50} | EMA20: {ema_20}" if sma_50 or ema_20 else ""
 
-    few_shot = """رد فقط بصيغة JSON صالحة (بدون markdown, بدون ```, بدون نص إضافي):
-{"recommendation": "شراء/بيع/انتظار", "confidence": 0-100, "tp": float or null, "sl": float or null, "risk_reward": float or null, "support": float or null, "resistance": float or null, "reason": "..."}
+    few_shot = """أمثلة على التنسيق المطلوب:
 
-ملاحظات التنسيق: recommendation يجب أن تكون "شراء" أو "بيع" أو "انتظار" فقط. confidence رقم من 0 إلى 100. وقتها null إذا ما في إشارة.
+مثال 1 - شراء قوي (تأكيد متعدد الفريمات):
+{"recommendation": "شراء","confidence": 85,"tp": 1.0875,"sl": 1.0835,"risk_reward": 1.7,"support": 1.0820,"resistance": 1.0900,"reason": "RSI 15m 28 + RSI ساعي 32 = ذروة بيع في فريمين. ADX 28 (trending). ارتداد من دعم رئيسي. MACD يعطي إشارة شراء. حجم التداول مرتفع."}
 
-أمثلة:
-- شراء قوي: {"recommendation": "شراء","confidence": 85,"tp": 1.0875,"sl": 1.0835,"risk_reward": 1.7,"support": 1.0820,"resistance": 1.0900,"reason": "RSI 15m 28 + RSI ساعي 32 = ذروة بيع في فريمين. ADX 28 (trending). ارتداد من دعم."}
-- بيع: {"recommendation": "بيع","confidence": 80,"tp": 150.20,"sl": 150.80,"risk_reward": 2.0,"support": 149.50,"resistance": 151.00,"reason": "RSI 15m 75 مع تباعد سلبي. Stochastic 88. ADX 32."}
-- انتظار: {"recommendation": "انتظار","confidence": 50,"tp": null,"sl": null,"risk_reward": null,"support": null,"resistance": null,"reason": "RSI 54 محايد. ADX 12 (متذبذب). لا يوجد نمط واضح."}"""
+مثال 2 - بيع (تباعد سلبي):
+{"recommendation": "بيع","confidence": 80,"tp": 150.20,"sl": 150.80,"risk_reward": 2.0,"support": 149.50,"resistance": 151.00,"reason": "RSI 15m 75 مع تباعد سلبي على فريم الساعة. Stochastic في ذروة شراء (88). السوق trending مع ADX 32. نموذج Doji بعد قمة."}
+
+مثال 3 - انتظار (تضارب):
+{"recommendation": "انتظار","confidence": 50,"tp": null,"sl": null,"risk_reward": null,"support": null,"resistance": null,"reason": "لا توجد إشارة واضحة. RSI 54 (محايد). ADX 12 (سوق متذبذب). لا يوجد نمط شمعة واضح. MACD متقاطع عرضي."}
+
+مثال 4 - شراء حذر (سوق متذبذب):
+{"recommendation": "شراء","confidence": 60,"tp": 1.0920,"sl": 1.0900,"risk_reward": 1.2,"support": 1.0895,"resistance": 1.0930,"reason": "RSI اليومي 33 (دعم طويل المدى) لكن ADX 13 (متذبذب). نشتري قرب الدعم مع SL ضيق."}
+
+الآن قم بتحليل البيانات التالية وأعد JSON فقط (بدون أي نص إضافي):"""
 
     return f"""{few_shot}
 
@@ -739,7 +769,7 @@ def _build_analysis_prompt(symbol, price, rsi, hr_rsi, daily_rsi, regime, headli
 
 أعد JSON فقط:"""
 
-def analyze(symbol, ai_timeout=30.0):
+def analyze(symbol, ai_timeout=30.0, analysis_type="deep"):
     price, err = get_price(symbol)
     if err: return f"[XX] {err}", 0, "انتظار", None, None, None, None, None, None, None, None, None, None
     sessions = get_active_sessions()
@@ -811,19 +841,20 @@ def analyze(symbol, ai_timeout=30.0):
 
         provider_names = {p["name"]: i for i, p in enumerate(AI_PROVIDERS)}
         ALL_PROVIDERS = ["groq", "minimax", "deepseek", "gemini"]
+        # Limit voting pool based on analysis_type
+        active_providers = TASK_PROVIDERS.get(analysis_type, ALL_PROVIDERS)
 
-        # Step 1: Independent analysis from ALL providers (Multi-AI voting)
+        # Step 1: Independent analysis from active providers (Multi-AI voting)
         tech_texts = {}; tech_recs = {}
         for attempt in range(2):
-            for tp in ALL_PROVIDERS:
+            for tp in active_providers:
                 if tp in provider_names:
                     try:
                         r1 = _ai_request(tech_prompt, temperature=0.1, provider_idx=provider_names[tp], timeout=ai_timeout)
                         txt = r1.choices[0].message.content.strip()
                         tech_texts[tp] = txt
                         try:
-                            clean = re.sub(r'^.*?({.*})[^}]*$', r'\1', txt.strip(), flags=re.DOTALL)
-                            clean = re.sub(r'```(?:json)?\s*|\s*```', '', clean).strip()
+                            clean = re.sub(r'```(?:json)?\s*', '', txt).strip()
                             p = json.loads(clean) if clean.startswith('{') else json.loads(re.search(r'\{.*\}', clean, re.DOTALL).group())
                             tech_recs[tp] = p.get("recommendation", "انتظار")
                         except:
@@ -865,8 +896,11 @@ def analyze(symbol, ai_timeout=30.0):
             if sent_text: break
             time.sleep(3)
 
-        # Step 3: Decision (Groq, with Multi-AI context)
-        if "groq" in provider_names and tech_text:
+        # Step 3: Decision (provider depends on analysis_type)
+        decider = TASK_DECIDER.get(analysis_type, "groq")
+        # Fallback chain: requested decider → groq → first available
+        decider_name = decider if decider in provider_names else ("groq" if "groq" in provider_names else (next(iter(provider_names), None)))
+        if decider_name and tech_text:
             # Build voting summary
             votes_str = []
             for name, rec in [("Groq", groq_rec), ("MiniMax", mm_rec), ("DeepSeek", ds_rec), ("Gemini", gm_rec)]:
@@ -901,7 +935,7 @@ def analyze(symbol, ai_timeout=30.0):
 {{"recommendation": "شراء/بيع/انتظار", "confidence": 85, "tp": {price}, "sl": {price}, "risk_reward": 2.0, "support": {price},"resistance": {price},"reason": "..."}}"""
             for attempt3 in range(2):
                 try:
-                    r3 = _ai_request(decision_prompt, temperature=0.1, provider_idx=provider_names["groq"], timeout=ai_timeout)
+                    r3 = _ai_request(decision_prompt, temperature=0.1, provider_idx=provider_names[decider_name], timeout=ai_timeout)
                     ai = r3.choices[0].message.content.strip()
                     break
                 except:
@@ -914,8 +948,7 @@ def analyze(symbol, ai_timeout=30.0):
 
         strength = ""
         try:
-            clean = re.sub(r'^.*?({.*})[^}]*$', r'\1', ai.strip(), flags=re.DOTALL)
-            clean = re.sub(r'```(?:json)?\s*|\s*```', '', clean).strip()
+            clean = re.sub(r'```(?:json)?\s*', '', ai).strip()
             parsed = json.loads(clean) if clean.startswith('{') else json.loads(re.search(r'\{.*\}', clean, re.DOTALL).group())
             rec = parsed.get("recommendation", "انتظار")
             ai_conf = int(parsed.get("confidence", 50))
@@ -1770,16 +1803,38 @@ async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_json('users.json', list(authorized_users))
     args = context.args
     if not args:
-        await update.message.reply_text("📝 استخدم: /analyze EURUSD\nالرموز: " + ", ".join(RADAR_ASSETS))
+        await update.message.reply_text(
+            "📝 *استخدم:* `/analyze EURUSD [نوع]`\n"
+            "الأنواع:\n"
+            "  • `fast` — سريع بدون AI (افتراضي)\n"
+            "  • `deep` — تحليل عميق بـ DeepSeek + تصويت كامل\n"
+            "  • `sentiment` — تحليل مشاعر بـ MiniMax\n"
+            "الرموز: " + ", ".join(RADAR_ASSETS),
+            parse_mode="Markdown"
+        )
         return
     symbol = args[0].upper()
     if symbol not in RADAR_ASSETS:
         await update.message.reply_text(f"❌ رمز غير صالح: {symbol}\nالرموز: " + ", ".join(RADAR_ASSETS))
         return
-    msg = await update.message.reply_text(f"🌀 جاري تحليل {symbol}...")
+    # Parse optional analysis type
+    VALID_TYPES = {"fast", "deep", "sentiment"}
+    analysis_type = "fast"
+    if len(args) >= 2 and args[1].lower() in VALID_TYPES:
+        analysis_type = args[1].lower()
+
+    type_icons = {"fast": "⚡", "deep": "🔬", "sentiment": "💬"}
+    type_labels = {"fast": "سريع (بدون AI)", "deep": "عميق (DeepSeek)", "sentiment": "مشاعر (MiniMax)"}
+    msg = await update.message.reply_text(
+        f"{type_icons[analysis_type]} جاري تحليل {symbol} — وضع {type_labels[analysis_type]}..."
+    )
     try:
-        # Fast single-AI analysis for Telegram (avoids Multi-AI timeout)
-        res = await asyncio.get_event_loop().run_in_executor(None, fast_analyze, symbol)
+        if analysis_type == "fast":
+            res = await asyncio.get_event_loop().run_in_executor(None, fast_analyze, symbol)
+        else:
+            res = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: analyze(symbol, ai_timeout=45.0, analysis_type=analysis_type)
+            )
         if not res or len(res) < 4:
             await msg.edit_text(f"❌ فشل تحليل {symbol}")
             return
@@ -2023,7 +2078,7 @@ async def unknown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── MAIN ───
 # ─── WEB API FOR MONITOR ───
 import os
-API_PORT = int(os.environ.get("PORT", 10993))
+API_PORT = int(os.environ.get("PORT", 5000))
 
 class SignalAPIHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args): pass
@@ -2135,6 +2190,30 @@ class SignalAPIHandler(BaseHTTPRequestHandler):
         elif path == "/api/radar/conf_down":
             MIN_CONFIDENCE = max(20, MIN_CONFIDENCE-5)
             self._json({"ok":True, "min_confidence":MIN_CONFIDENCE})
+        elif path == "/api/radar/now":
+            def _run_radar_now():
+                logging.info("RadarNow: manual scan triggered")
+                for asset in RADAR_ASSETS:
+                    try:
+                        res = analyze(asset)
+                        if res and len(res) >= 4:
+                            confidence, rec, price = res[1], res[2], res[3]
+                            if confidence >= MIN_CONFIDENCE and rec not in ("WAIT", "انتظار") and price and price != "--":
+                                log_signal(asset, rec, confidence, price,
+                                    res[4] if len(res)>4 else "", res[5] if len(res)>5 else "",
+                                    res[6] if len(res)>6 else "", res[7] if len(res)>7 else "",
+                                    res[8] if len(res)>8 else "", res[9] if len(res)>9 else "",
+                                    res[10] if len(res)>10 else "", res[11] if len(res)>11 else "",
+                                    res[12] if len(res)>12 else "",
+                                    candle_patterns=res[13] if len(res)>13 else "",
+                                    vol_note=res[14] if len(res)>14 else "",
+                                    adx=res[15] if len(res)>15 else None,
+                                    session=res[16] if len(res)>16 else "")
+                    except Exception as e:
+                        logging.error(f"RadarNow: {asset} {e}")
+                logging.info("RadarNow: scan complete")
+            threading.Thread(target=_run_radar_now, daemon=True).start()
+            self._json({"ok": True, "message": "Radar scan started", "assets": len(RADAR_ASSETS)})
         elif path == "/api/radar/status":
             self._json({"ok":True, "radar_enabled":RADAR_ENABLED, "min_confidence":MIN_CONFIDENCE, "interval":RADAR_INTERVAL, "signals":len(signal_log)})
         elif len(parts) >= 4 and parts[1] == "api" and parts[2] == "analyze":
@@ -2335,28 +2414,21 @@ def main():
         logging.warning("API server may not be ready")
 
     logging.info(" AURA CLOUD V4")
-    try:
-        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-    finally:
-        try: app.stop()
-        except: pass
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
-    restart_delay = 5
     while True:
         try:
-            try: asyncio.get_event_loop().close()
-            except: pass
+            try:
+                asyncio.get_event_loop().close()
+            except:
+                pass
             asyncio.set_event_loop(asyncio.new_event_loop())
             main()
-            restart_delay = 5
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as e:
-            err = str(e).lower()
-            if "conflict" in err:
-                restart_delay = 15
-            logging.critical(f"CRASH [{restart_delay}s]: {e}\n{traceback.format_exc()}")
+            logging.critical(f"CRASH: {e}\n{traceback.format_exc()}")
             import gc; gc.collect()
-            time.sleep(restart_delay)
-            restart_delay = min(restart_delay + 5, 30)
+            logging.info("Restarting in 5s...")
+            time.sleep(5)
