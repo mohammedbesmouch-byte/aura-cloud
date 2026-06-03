@@ -126,6 +126,7 @@ tr:hover{background:#11182733}
   <button class="btn ctrl" onclick="apiPost('radar/conf_up')">▲ <span data-lang="ar">ثقة+5</span><span data-lang="fr" style="display:none">Conf+5</span><span data-lang="en" style="display:none">Conf+5</span></button>
   <button class="btn ctrl" onclick="apiPost('radar/conf_down')">▼ <span data-lang="ar">ثقة-5</span><span data-lang="fr" style="display:none">Conf-5</span><span data-lang="en" style="display:none">Conf-5</span></button>
   <button class="btn ctrl" onclick="apiGet('scan')">🔍 <span data-lang="ar">مسح</span><span data-lang="fr" style="display:none">Scan</span><span data-lang="en" style="display:none">Scan</span></button>
+  <button class="btn" id="scanNowBtn" onclick="scanNow()" style="background:linear-gradient(135deg,#ffd60033,#ff980033);color:#ffd600;border:1px solid #ffd60055;font-size:11px;">⚡ <span data-lang="ar">فحص الآن</span><span data-lang="fr" style="display:none">Scan Now</span><span data-lang="en" style="display:none">Scan Now</span></button>
 </div>
 
 <div id="tab-sigs"></div>
@@ -158,7 +159,7 @@ var curLang='ar', eqChart, perfChart, chatWaiting=false;
 
 var L={
   ar:{signals:'الإشارات',assets:'الأصول',equity:'الأرباح',providers:'المزودون',perf:'الأداء',alerts:'التنبيهات',archive:'السجل',chat:'المساعد',
-      radar:'رادار',confUp:'ثقة+5',confDown:'ثقة-5',scan:'مسح',
+      radar:'رادار',confUp:'ثقة+5',confDown:'ثقة-5',scan:'مسح',scanNow:'فحص الآن',
       sigTotal:'الإشارات',wins:'أرباح',losses:'خسائر',wr:'نسبة نجاح',conf:'ثقة',
       enter:'دخول',skip:'تخطي',exit:'خروج',inside:'داخل',skipped:'تم التخطي',
       noSigs:'لا توجد إشارات',noData:'لا توجد بيانات',analyze:'تحليل',
@@ -169,7 +170,7 @@ var L={
       provider:'المزود',winsCol:'أرباح',lossesCol:'خسائر',rateCol:'نسبة',
       oldSys:'النظام القديم',active:'نشط',total:'الإجمالي'},
   fr:{signals:'Signaux',assets:'Actifs',equity:'Gains',providers:'Fournisseurs',perf:'Performance',alerts:'Alertes',archive:'Archives',chat:'Assistant',
-      radar:'Radar',confUp:'Conf+5',confDown:'Conf-5',scan:'Scan',
+      radar:'Radar',confUp:'Conf+5',confDown:'Conf-5',scan:'Scan',scanNow:'Scan Now',
       sigTotal:'Signaux',wins:'Gains',losses:'Pertes',wr:'Taux gain',conf:'Confiance',
       enter:'Entrer',skip:'Passer',exit:'Sortie',inside:'Entré',skipped:'Passé',
       noSigs:'Aucun signal',noData:'Aucune donnée',analyze:'Analyser',
@@ -180,7 +181,7 @@ var L={
       provider:'Fournisseur',winsCol:'Gains',lossesCol:'Pertes',rateCol:'Taux',
       oldSys:'Ancien système',active:'Actif',total:'Total'},
   en:{signals:'Signals',assets:'Assets',equity:'Equity',providers:'Providers',perf:'Performance',alerts:'Alerts',archive:'Archive',chat:'AI Chat',
-      radar:'Radar',confUp:'Conf+5',confDown:'Conf-5',scan:'Scan',
+      radar:'Radar',confUp:'Conf+5',confDown:'Conf-5',scan:'Scan',scanNow:'Scan Now',
       sigTotal:'Signals',wins:'Wins',losses:'Losses',wr:'Win Rate',conf:'Confidence',
       enter:'Enter',skip:'Skip',exit:'Exit',inside:'Inside',skipped:'Skipped',
       noSigs:'No signals',noData:'No data',analyze:'Analyze',
@@ -222,6 +223,23 @@ function showTab(n){
 }
 
 function apiPost(p){var x=new XMLHttpRequest();x.open('POST','/api/'+p,true);x.onload=function(){load()};x.send()}
+function scanNow(){
+  var btn=document.getElementById('scanNowBtn');
+  btn.disabled=true;btn.style.opacity='0.5';
+  btn.innerHTML='⏳ <span>جاري الفحص...</span>';
+  var x=new XMLHttpRequest();x.open('POST','/api/radar/now',true);
+  x.onload=function(){
+    var info=document.getElementById('info');
+    if(info){info.textContent='✅ بدأ الفحص — '+(new Date()).toLocaleTimeString();setTimeout(function(){info.textContent=''},8000)}
+    setTimeout(function(){
+      btn.disabled=false;btn.style.opacity='1';
+      btn.innerHTML='⚡ <span data-lang="ar">فحص الآن</span><span data-lang="fr" style="display:none">Scan Now</span><span data-lang="en" style="display:none">Scan Now</span>';
+      setLang(curLang);load();
+    },5000);
+  };
+  x.onerror=function(){btn.disabled=false;btn.style.opacity='1'};
+  x.send();
+}
 function apiGet(p){var x=new XMLHttpRequest();x.open('GET','/api/'+p,true);x.onload=function(){load()};x.send()}
 function act(id,action){var x=new XMLHttpRequest();x.open('POST','/api/'+action+'/'+id,true);x.onload=function(){load()};x.send()}
 
