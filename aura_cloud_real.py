@@ -46,6 +46,7 @@ def _env(k, default=""):
                         break
         except: pass
     return v or default
+
 DEFAULT_POSITION_SIZE = float(_env("POSITION_SIZE", "1000"))
 
 TELEGRAM_BOT_TOKEN = _env("TELEGRAM_BOT_TOKEN")
@@ -86,12 +87,23 @@ def save_json(path, data):
         with open(path, 'w', encoding='utf-8') as f: json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e: logging.error(f"Save {path}: {e}")
 
+def ensure_json_file(path, default):
+    if not os.path.exists(path):
+        save_json(path, default)
+        logging.info(f"Created {path} with default")
+
 def archive_append(signal):
     try:
         with open('archive.json', 'a', encoding='utf-8') as f:
-            f.write(json.dumps(signal, ensure_ascii=False) + '\n')
+            json.dump(signal, f, ensure_ascii=False)
+            f.write('\n')
     except Exception as e:
         logging.error(f"Archive append: {e}")
+
+ensure_json_file('alerts.json', [])
+ensure_json_file('price_cache.json', {})
+ensure_json_file('users.json', [])
+ensure_json_file('signals.json', [])
 
 signal_log = load_json('signals.json', [])
 # Clean garbage WAIT signals on startup
@@ -132,31 +144,18 @@ _last_primary_check = 0
 _PRIMARY_CHECK_INTERVAL = 1800
 
 # ─── MODEL ROUTING ───
-def get_model_for_task(task_type="deep"):
-    """
-    Returns provider index for a given task type.
-      deep      → DeepSeek  (comprehensive multi-AI analysis)
-      fast      → Groq      (single fast analysis)
-      sentiment → MiniMax   (sentiment-focused analysis)
-    Falls back to index 0 if requested provider not configured.
-    """
-    mapping = {"deep": "deepseek", "fast": "groq", "sentiment": "minimax"}
-    target = mapping.get(task_type, "groq")
-    for i, p in enumerate(AI_PROVIDERS):
-        if p["name"] == target:
-            return i
-    return 0
+MODEL_TASKS = {
+    "deep": "deepseek",
+    "fast": "minimax",
+    "sentiment": "groq",
+    "decision": "groq",
+}
+def get_model_for_task(task, provider_names):
+    name = MODEL_TASKS.get(task)
+    if name and name in provider_names:
+        return provider_names[name]
+    return provider_names.get("groq", 0)
 
-TASK_PROVIDERS = {
-    "deep":      ["groq", "minimax", "deepseek", "gemini"],  # all vote
-    "fast":      ["groq"],                                    # Groq only
-    "sentiment": ["minimax", "groq"],                         # MiniMax primary
-}
-TASK_DECIDER = {
-    "deep":      "deepseek",   # DeepSeek makes final call
-    "fast":      "groq",       # Groq makes final call
-    "sentiment": "minimax",    # MiniMax makes final call
-}
 # Learning system: stores lessons from past trades
 lessons_log = load_json('lessons.json', [])
 MAX_LESSONS = 50
@@ -198,9 +197,11 @@ def _ai_request(prompt, temperature=0.1, provider_idx=None, timeout=30.0):
                 if nxt != idx:
                     _current_provider = nxt
                     logging.warning(f"Provider {p['name']} ({p['model']}) → {err[:80]} → switching to {AI_PROVIDERS[nxt]['name']}")
+                time.sleep(4)
                 continue
             errors.append(f"{p['name']}: {e}")
             if i < loop_count - 1:
+                time.sleep(2)
                 continue
             break
     raise Exception(f"AI all failed: {' | '.join(errors)}")
@@ -614,22 +615,70 @@ def parse_signal(text):
     except Exception: pass
     return rec, strength, confidence, tp, sl, rr, sup, res, reason
 
-def build_signal_card(symbol, price, rsi, rec, strength, confidence, tp, sl, rr, sup, res, sentiment_label, sentiment_score, reason="", regime=None, daily_rsi=None, adx_val=None, candle_patterns="", vol_note="", session="", provider_used=""):
+def local_rule_signal(price, rsi, hr_rsi, daily_rsi, adx_val, regime):
+    try: price_f = float(price)
+    except: return "انتظار", 30, price, price, price, price, price, "تحليل محلي: بيانات غير كافية"
+    if rsi is None and hr_rsi is None and daily_rsi is None:
+        return "انتظار", 30, price, price, price, price, price, "تحليل محلي: لا توجد مؤشرات"
+    signals = []; conf = 50
+    if rsi is not None:
+        if rsi < 28: signals.append("شراء"); conf += 15
+        elif rsi < 38: signals.append("شراء"); conf += 8
+        elif rsi > 72: signals.append("بيع"); conf += 15
+        elif rsi > 62: signals.append("بيع"); conf += 8
+    if hr_rsi is not None:
+        if hr_rsi < 30 and "شراء" not in signals: signals.append("شراء"); conf += 10
+        elif hr_rsi > 70 and "بيع" not in signals: signals.append("بيع"); conf += 10
+    if daily_rsi is not None:
+        if daily_rsi < 30: signals.append("شراء"); conf += 10
+        elif daily_rsi > 70: signals.append("بيع"); conf += 10
+    if adx_val is not None:
+        if adx_val < 15: conf -= 15
+        elif adx_val > 30: conf += 5
+    buy_c = signals.count("شراء"); sell_c = signals.count("بيع")
+    if buy_c > sell_c: rec = "شراء"; atr_mult = 2
+    elif sell_c > buy_c: rec = "بيع"; atr_mult = 2
+    else: rec = "انتظار"; atr_mult = 1; conf = max(30, conf - 10)
+    if regime.get("trend") == "ranging" and rec != "انتظار": conf = int(conf * 0.7)
+    conf = max(15, min(95, conf))
+    atr_val = price_f * 0.003
+    if rec == "شراء":
+        tp = round(price_f + atr_val * atr_mult, 5); sl = round(price_f - atr_val, 5)
+        rr = round((tp - price_f) / (price_f - sl), 2) if (price_f - sl) > 0 else 1
+        sup = round(price_f - atr_val * 1.5, 5); res = round(price_f + atr_val * 2.5, 5)
+    elif rec == "بيع":
+        tp = round(price_f - atr_val * atr_mult, 5); sl = round(price_f + atr_val, 5)
+        rr = round((price_f - tp) / (sl - price_f), 2) if (sl - price_f) > 0 else 1
+        sup = round(price_f - atr_val * 1.5, 5); res = round(price_f + atr_val * 2.5, 5)
+    else:
+        tp = ""; sl = ""; rr = ""; sup = ""; res = ""
+    reason = f"قاعدة محلية: RSI {rsi or '?'}/{hr_rsi or '?'}/{daily_rsi or '?'} ADX {adx_val or '?'}"
+    return rec, conf, str(tp), str(sl), str(rr), str(sup), str(res), reason
+
+def build_signal_card(symbol, price, rsi, rec, strength, confidence, tp, sl, rr, sup, res, sentiment_label, sentiment_score, reason="", regime=None, daily_rsi=None, adx_val=None, candle_patterns="", vol_note="", session="", provider_used="", hr_rsi=None, macd=None, stoch=None, pivots=None, high_impact=False):
     rec_label = "[BUY]" if "شراء" in rec else ("[SELL]" if "بيع" in rec else "[WAIT]")
     rec_sign = "(+)" if "شراء" in rec else ("(-)" if "بيع" in rec else "(=)")
     sep = "="*16
     lines = [f"{rec_sign} {symbol}  {rec_label}  {confidence}%", sep]
     if price: lines += [f"Price: {price}"]
     if rsi: lines += [f"RSI(15m): {rsi}"]
+    if hr_rsi: lines += [f"RSI(1h): {hr_rsi}"]
     if regime:
         ri = {"trending":"📈","weak_trend":"📊","ranging":"📉"}.get(regime["trend"],"📊")
         di = {"up":"↑","down":"↓","flat":"→"}.get(regime["direction"],"→")
-        lines += [f"Market: {ri} {regime['trend']} {di}"]
+        line = f"Market: {ri} {regime['trend']} {di}"
+        if regime.get("strength"): line += f" ({regime['strength']})"
+        if regime.get("volatility") == "high": line += " ⚠️"
+        lines += [line]
     if adx_val: lines += [f"ADX: {adx_val}"]
     if daily_rsi: lines += [f"RSI(1d): {daily_rsi}"]
+    if stoch is not None: lines += [f"Stoch: K {stoch}"]
+    if macd: lines += [f"MACD: {macd['macd']}"]
+    if pivots: lines += [f"Pivots: PP {pivots['pp']} | R1 {pivots['r1']} | S1 {pivots['s1']}"]
     if session: lines += [f"Session: {session}"]
     if candle_patterns: lines += [f"Patterns: {candle_patterns[:60]}"]
     if vol_note: lines += [f"Vol: {vol_note[:40]}"]
+    if high_impact: lines += ["⚠️ أخبار اقتصادية قوية اليوم"]
     sent_mark = "(+)" if sentiment_score > 0.3 else ("(-)" if sentiment_score < -0.3 else "(=)")
     lines += [f"Sentiment: {sentiment_label} {sent_mark} {sentiment_score:+.1f}", sep]
     if tp and sl: lines += [f"TP: {tp} | SL: {sl}"]
@@ -639,7 +688,7 @@ def build_signal_card(symbol, price, rsi, rec, strength, confidence, tp, sl, rr,
     if provider_used: lines += [f"AI: {provider_used}"]
     if reason:
         r = reason.replace("*","").replace("_","").replace("`","").strip()
-        if r: lines += [f"* {r[:250]}"]
+        if r: lines += [f"* {r[:300]}"]
     return "\n".join(lines)
 
 def dynamic_confidence(rsi_val, sentiment_score, ai_conf, rec):
@@ -730,21 +779,15 @@ def _build_analysis_prompt(symbol, price, rsi, hr_rsi, daily_rsi, regime, headli
     pivot_note = f"\n- Pivot: {pivots['pp']} | R1: {pivots['r1']} R2: {pivots['r2']} | S1: {pivots['s1']} S2: {pivots['s2']}" if pivots else ""
     ma_note = f"\n- SMA50: {sma_50} | EMA20: {ema_20}" if sma_50 or ema_20 else ""
 
-    few_shot = """أمثلة على التنسيق المطلوب:
+    few_shot = """رد فقط بصيغة JSON صالحة (بدون markdown, بدون ```, بدون نص إضافي):
+{"recommendation": "شراء/بيع/انتظار", "confidence": 0-100, "tp": float or null, "sl": float or null, "risk_reward": float or null, "support": float or null, "resistance": float or null, "reason": "..."}
 
-مثال 1 - شراء قوي (تأكيد متعدد الفريمات):
-{"recommendation": "شراء","confidence": 85,"tp": 1.0875,"sl": 1.0835,"risk_reward": 1.7,"support": 1.0820,"resistance": 1.0900,"reason": "RSI 15m 28 + RSI ساعي 32 = ذروة بيع في فريمين. ADX 28 (trending). ارتداد من دعم رئيسي. MACD يعطي إشارة شراء. حجم التداول مرتفع."}
+ملاحظات التنسيق: recommendation يجب أن تكون "شراء" أو "بيع" أو "انتظار" فقط. confidence رقم من 0 إلى 100. وقتها null إذا ما في إشارة.
 
-مثال 2 - بيع (تباعد سلبي):
-{"recommendation": "بيع","confidence": 80,"tp": 150.20,"sl": 150.80,"risk_reward": 2.0,"support": 149.50,"resistance": 151.00,"reason": "RSI 15m 75 مع تباعد سلبي على فريم الساعة. Stochastic في ذروة شراء (88). السوق trending مع ADX 32. نموذج Doji بعد قمة."}
-
-مثال 3 - انتظار (تضارب):
-{"recommendation": "انتظار","confidence": 50,"tp": null,"sl": null,"risk_reward": null,"support": null,"resistance": null,"reason": "لا توجد إشارة واضحة. RSI 54 (محايد). ADX 12 (سوق متذبذب). لا يوجد نمط شمعة واضح. MACD متقاطع عرضي."}
-
-مثال 4 - شراء حذر (سوق متذبذب):
-{"recommendation": "شراء","confidence": 60,"tp": 1.0920,"sl": 1.0900,"risk_reward": 1.2,"support": 1.0895,"resistance": 1.0930,"reason": "RSI اليومي 33 (دعم طويل المدى) لكن ADX 13 (متذبذب). نشتري قرب الدعم مع SL ضيق."}
-
-الآن قم بتحليل البيانات التالية وأعد JSON فقط (بدون أي نص إضافي):"""
+أمثلة:
+- شراء قوي: {"recommendation": "شراء","confidence": 85,"tp": 1.0875,"sl": 1.0835,"risk_reward": 1.7,"support": 1.0820,"resistance": 1.0900,"reason": "RSI 15m 28 + RSI ساعي 32 = ذروة بيع في فريمين. ADX 28 (trending). ارتداد من دعم."}
+- بيع: {"recommendation": "بيع","confidence": 80,"tp": 150.20,"sl": 150.80,"risk_reward": 2.0,"support": 149.50,"resistance": 151.00,"reason": "RSI 15m 75 مع تباعد سلبي. Stochastic 88. ADX 32."}
+- انتظار: {"recommendation": "انتظار","confidence": 50,"tp": null,"sl": null,"risk_reward": null,"support": null,"resistance": null,"reason": "RSI 54 محايد. ADX 12 (متذبذب). لا يوجد نمط واضح."}"""
 
     return f"""{few_shot}
 
@@ -769,7 +812,7 @@ def _build_analysis_prompt(symbol, price, rsi, hr_rsi, daily_rsi, regime, headli
 
 أعد JSON فقط:"""
 
-def analyze(symbol, ai_timeout=30.0, analysis_type="deep"):
+def analyze(symbol, ai_timeout=30.0, analysis_type="auto"):
     price, err = get_price(symbol)
     if err: return f"[XX] {err}", 0, "انتظار", None, None, None, None, None, None, None, None, None, None
     sessions = get_active_sessions()
@@ -840,31 +883,74 @@ def analyze(symbol, ai_timeout=30.0, analysis_type="deep"):
         sent_prompt = f"حلل المشاعر للأخبار التالية وأعط رقماً بين -1 و +1 (بدون تفسير):\n{chr(10).join('- '+h for h in headlines)}"
 
         provider_names = {p["name"]: i for i, p in enumerate(AI_PROVIDERS)}
-        ALL_PROVIDERS = ["groq", "minimax", "deepseek", "gemini"]
-        # Limit voting pool based on analysis_type
-        active_providers = TASK_PROVIDERS.get(analysis_type, ALL_PROVIDERS)
 
-        # Step 1: Independent analysis from active providers (Multi-AI voting)
+        # Step 1: Analysis (routed by analysis_type)
         tech_texts = {}; tech_recs = {}
-        for attempt in range(2):
-            for tp in active_providers:
-                if tp in provider_names:
+        if analysis_type == "sentiment":
+            pass  # skip technical AI, only sentiment + decision below
+        elif analysis_type == "deep":
+            dp = get_model_for_task("deep", provider_names)
+            for attempt in range(2):
+                for pname, pidx in provider_names.items():
+                    if pidx != dp: continue
                     try:
-                        r1 = _ai_request(tech_prompt, temperature=0.1, provider_idx=provider_names[tp], timeout=ai_timeout)
+                        r1 = _ai_request(tech_prompt, temperature=0.1, provider_idx=pidx, timeout=ai_timeout)
                         txt = r1.choices[0].message.content.strip()
-                        tech_texts[tp] = txt
+                        tech_texts[pname] = txt
                         try:
-                            clean = re.sub(r'```(?:json)?\s*', '', txt).strip()
+                            clean = re.sub(r'^.*?({.*})[^}]*$', r'\1', txt.strip(), flags=re.DOTALL)
+                            clean = re.sub(r'```(?:json)?\s*|\s*```', '', clean).strip()
                             p = json.loads(clean) if clean.startswith('{') else json.loads(re.search(r'\{.*\}', clean, re.DOTALL).group())
-                            tech_recs[tp] = p.get("recommendation", "انتظار")
+                            tech_recs[pname] = p.get("recommendation", "انتظار")
                         except:
-                            tech_recs[tp] = "انتظار"
+                            tech_recs[pname] = "انتظار"
                     except Exception as e:
-                        logging.warning(f"Tech AI ({tp}) failed: {e}")
-                        continue
-            if tech_texts: break
-            time.sleep(4)
-        # Multi-AI voting: all providers vote
+                        logging.warning(f"Tech AI deep ({pname}) failed: {e}")
+                if tech_texts: break
+                time.sleep(4)
+        elif analysis_type == "fast":
+            fp = get_model_for_task("fast", provider_names)
+            for attempt in range(2):
+                for pname, pidx in provider_names.items():
+                    if pidx != fp: continue
+                    try:
+                        r1 = _ai_request(tech_prompt, temperature=0.1, provider_idx=pidx, timeout=ai_timeout)
+                        txt = r1.choices[0].message.content.strip()
+                        tech_texts[pname] = txt
+                        try:
+                            clean = re.sub(r'^.*?({.*})[^}]*$', r'\1', txt.strip(), flags=re.DOTALL)
+                            clean = re.sub(r'```(?:json)?\s*|\s*```', '', clean).strip()
+                            p = json.loads(clean) if clean.startswith('{') else json.loads(re.search(r'\{.*\}', clean, re.DOTALL).group())
+                            tech_recs[pname] = p.get("recommendation", "انتظار")
+                        except:
+                            tech_recs[pname] = "انتظار"
+                    except Exception as e:
+                        logging.warning(f"Tech AI fast ({pname}) failed: {e}")
+                if tech_texts: break
+                time.sleep(4)
+        else:
+            # "auto": Full 4-provider voting
+            ALL_PROVIDERS = ["groq", "minimax", "deepseek", "gemini"]
+            for attempt in range(2):
+                for tp in ALL_PROVIDERS:
+                    if tp in provider_names:
+                        try:
+                            r1 = _ai_request(tech_prompt, temperature=0.1, provider_idx=provider_names[tp], timeout=ai_timeout)
+                            txt = r1.choices[0].message.content.strip()
+                            tech_texts[tp] = txt
+                            try:
+                                clean = re.sub(r'^.*?({.*})[^}]*$', r'\1', txt.strip(), flags=re.DOTALL)
+                                clean = re.sub(r'```(?:json)?\s*|\s*```', '', clean).strip()
+                                p = json.loads(clean) if clean.startswith('{') else json.loads(re.search(r'\{.*\}', clean, re.DOTALL).group())
+                                tech_recs[tp] = p.get("recommendation", "انتظار")
+                            except:
+                                tech_recs[tp] = "انتظار"
+                        except Exception as e:
+                            logging.warning(f"Tech AI ({tp}) failed: {e}")
+                            continue
+                if tech_texts: break
+                time.sleep(4)
+        # Multi-AI voting results
         groq_rec = tech_recs.get("groq", "")
         mm_rec = tech_recs.get("minimax", "")
         ds_rec = tech_recs.get("deepseek", "")
@@ -877,30 +963,34 @@ def analyze(symbol, ai_timeout=30.0, analysis_type="deep"):
         majority_dir = "شراء" if votes_buy > votes_sell else ("بيع" if votes_sell > votes_buy else "")
         all_agree = (total_voted == 4 and (votes_buy == 4 or votes_sell == 4))
 
-        # Step 2: Sentiment (try MiniMax, fallback to Groq)
+        # Step 2: Sentiment (routed via MODEL_TASKS, fallback chain)
         sent_text = ""
+        sent_candidates = []
+        primary_idx = get_model_for_task("sentiment", provider_names)
+        if primary_idx is not None:
+            # primary + fallbacks in order
+            all_names = list(provider_names.keys())
+            primary_name = [k for k, v in provider_names.items() if v == primary_idx][0]
+            others = [n for n in all_names if n != primary_name]
+            sent_candidates = [primary_idx] + [provider_names[n] for n in others if n in provider_names]
         for attempt2 in range(2):
-            for sp in ["minimax", "groq"]:
-                if sp in provider_names:
-                    try:
-                        r2 = _ai_request(sent_prompt, temperature=0.1, provider_idx=provider_names[sp], timeout=ai_timeout)
-                        sent_resp = r2.choices[0].message.content.strip()
-                        s_match = re.search(r'([+-]?\d+\.?\d*)', sent_resp)
-                        if s_match:
-                            sentiment_score = max(-1, min(1, float(s_match.group(1))))
-                            sentiment_label = "[POS]" if sentiment_score > 0.3 else ("[NEG]" if sentiment_score < -0.3 else "[NEU]")
+            for sp_idx in sent_candidates:
+                try:
+                    r2 = _ai_request(sent_prompt, temperature=0.1, provider_idx=sp_idx, timeout=ai_timeout)
+                    sent_resp = r2.choices[0].message.content.strip()
+                    s_match = re.search(r'([+-]?\d+\.?\d*)', sent_resp)
+                    if s_match:
+                        sentiment_score = max(-1, min(1, float(s_match.group(1))))
+                        sentiment_label = "[POS]" if sentiment_score > 0.3 else ("[NEG]" if sentiment_score < -0.3 else "[NEU]")
                         sent_text = sent_resp
                         break
-                    except:
-                        continue
+                except:
+                    continue
             if sent_text: break
             time.sleep(3)
 
-        # Step 3: Decision (provider depends on analysis_type)
-        decider = TASK_DECIDER.get(analysis_type, "groq")
-        # Fallback chain: requested decider → groq → first available
-        decider_name = decider if decider in provider_names else ("groq" if "groq" in provider_names else (next(iter(provider_names), None)))
-        if decider_name and tech_text:
+        # Step 3: Decision (Groq, with Multi-AI context)
+        if "groq" in provider_names and tech_text:
             # Build voting summary
             votes_str = []
             for name, rec in [("Groq", groq_rec), ("MiniMax", mm_rec), ("DeepSeek", ds_rec), ("Gemini", gm_rec)]:
@@ -935,7 +1025,7 @@ def analyze(symbol, ai_timeout=30.0, analysis_type="deep"):
 {{"recommendation": "شراء/بيع/انتظار", "confidence": 85, "tp": {price}, "sl": {price}, "risk_reward": 2.0, "support": {price},"resistance": {price},"reason": "..."}}"""
             for attempt3 in range(2):
                 try:
-                    r3 = _ai_request(decision_prompt, temperature=0.1, provider_idx=provider_names[decider_name], timeout=ai_timeout)
+                    r3 = _ai_request(decision_prompt, temperature=0.1, provider_idx=provider_names["groq"], timeout=ai_timeout)
                     ai = r3.choices[0].message.content.strip()
                     break
                 except:
@@ -948,7 +1038,8 @@ def analyze(symbol, ai_timeout=30.0, analysis_type="deep"):
 
         strength = ""
         try:
-            clean = re.sub(r'```(?:json)?\s*', '', ai).strip()
+            clean = re.sub(r'^.*?({.*})[^}]*$', r'\1', ai.strip(), flags=re.DOTALL)
+            clean = re.sub(r'```(?:json)?\s*|\s*```', '', clean).strip()
             parsed = json.loads(clean) if clean.startswith('{') else json.loads(re.search(r'\{.*\}', clean, re.DOTALL).group())
             rec = parsed.get("recommendation", "انتظار")
             ai_conf = int(parsed.get("confidence", 50))
@@ -960,8 +1051,10 @@ def analyze(symbol, ai_timeout=30.0, analysis_type="deep"):
             reason = (parsed.get("reason") or "")[:120]
         except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
             logging.warning(f"JSON parse failed for {symbol}, falling back to regex")
-            rec, strength, ai_conf, tp, sl, rr, sup, res, reason = parse_signal(ai)
-
+            if not ai or not ai.strip():
+                rec, ai_conf, tp, sl, rr, sup, res, reason = local_rule_signal(price, rsi, hr_rsi, daily_rsi, adx_result[0] if adx_result else None, regime)
+            else:
+                rec, strength, ai_conf, tp, sl, rr, sup, res, reason = parse_signal(ai)
         # Multi-AI voting adjustment
         if total_voted >= 3 and not all_agree and rec not in ("انتظار", "WAIT"):
             conflict_ratio = min(votes_buy, votes_sell) / max(votes_buy, votes_sell) if max(votes_buy, votes_sell) else 1
@@ -1047,7 +1140,7 @@ def analyze(symbol, ai_timeout=30.0, analysis_type="deep"):
         if high_vol and rec not in ("انتظار", "WAIT"):
             conf = min(100, conf + 5)
 
-        card = build_signal_card(symbol, price, rsi, rec, strength, conf, tp, sl, rr, sup, res, sentiment_label, sentiment_score, reason, regime=regime, daily_rsi=daily_rsi, adx_val=adx_val, candle_patterns=', '.join(candle_patterns) if candle_patterns else "", vol_note=vol_note, session=session_str, provider_used=AI_PROVIDERS[_current_provider]["name"] if AI_PROVIDERS else "")
+        card = build_signal_card(symbol, price, rsi, rec, strength, conf, tp, sl, rr, sup, res, sentiment_label, sentiment_score, reason, regime=regime, daily_rsi=daily_rsi, adx_val=adx_val, candle_patterns=', '.join(candle_patterns) if candle_patterns else "", vol_note=vol_note, session=session_str, provider_used=AI_PROVIDERS[_current_provider]["name"] if AI_PROVIDERS else "", hr_rsi=hr_rsi, macd=macd, stoch=stoch, pivots=pivots, high_impact=high_impact)
         cp_str = ', '.join(candle_patterns) if candle_patterns else ""
         return card, conf, rec, price, tp, sl, rr, sup, res, rsi, sentiment_label, sentiment_score, reason, cp_str, vol_note, adx_val, session_str
     except Exception as e:
@@ -1140,7 +1233,7 @@ def fast_analyze(symbol):
     if rec != "انتظار" and regime["trend"] == "trending": conf = min(95, conf + 15)
     if high_impact: conf = max(30, conf - 10)
     sentiment_score, sentiment_label = 0, "[NEU]"
-    card = build_signal_card(symbol, price, rsi, rec, "", conf, tp, sl, rr, sup, res, sentiment_label, sentiment_score, reason, regime=regime, daily_rsi=daily_rsi, adx_val=adx_result[0] if adx_result else None, candle_patterns=', '.join(candle_patterns), vol_note=vol_note, session=session_str, provider_used="تحليل فني سريع")
+    card = build_signal_card(symbol, price, rsi, rec, "", conf, tp, sl, rr, sup, res, sentiment_label, sentiment_score, reason, regime=regime, daily_rsi=daily_rsi, adx_val=adx_result[0] if adx_result else None, candle_patterns=', '.join(candle_patterns), vol_note=vol_note, session=session_str, provider_used="تحليل فني سريع", hr_rsi=hr_rsi, macd=None, stoch=None, pivots=None, high_impact=high_impact)
     return card, conf, rec, price, tp, sl, rr, sup, res, rsi, sentiment_label, sentiment_score, reason, ', '.join(candle_patterns), vol_note, adx_result[0] if adx_result else None, session_str
 
 def analyze_web(symbol):
@@ -1803,38 +1896,22 @@ async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_json('users.json', list(authorized_users))
     args = context.args
     if not args:
-        await update.message.reply_text(
-            "📝 *استخدم:* `/analyze EURUSD [نوع]`\n"
-            "الأنواع:\n"
-            "  • `fast` — سريع بدون AI (افتراضي)\n"
-            "  • `deep` — تحليل عميق بـ DeepSeek + تصويت كامل\n"
-            "  • `sentiment` — تحليل مشاعر بـ MiniMax\n"
-            "الرموز: " + ", ".join(RADAR_ASSETS),
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("📝 استخدم: /analyze EURUSD [deep|fast|sentiment]\nالرموز: " + ", ".join(RADAR_ASSETS))
         return
     symbol = args[0].upper()
     if symbol not in RADAR_ASSETS:
         await update.message.reply_text(f"❌ رمز غير صالح: {symbol}\nالرموز: " + ", ".join(RADAR_ASSETS))
         return
-    # Parse optional analysis type
-    VALID_TYPES = {"fast", "deep", "sentiment"}
-    analysis_type = "fast"
-    if len(args) >= 2 and args[1].lower() in VALID_TYPES:
-        analysis_type = args[1].lower()
-
-    type_icons = {"fast": "⚡", "deep": "🔬", "sentiment": "💬"}
-    type_labels = {"fast": "سريع (بدون AI)", "deep": "عميق (DeepSeek)", "sentiment": "مشاعر (MiniMax)"}
-    msg = await update.message.reply_text(
-        f"{type_icons[analysis_type]} جاري تحليل {symbol} — وضع {type_labels[analysis_type]}..."
-    )
+    analysis_type = "auto"
+    if len(args) >= 2:
+        at = args[1].lower()
+        if at in ("deep", "fast", "sentiment"): analysis_type = at
+    msg = await update.message.reply_text(f"🌀 جاري تحليل {symbol} ({analysis_type})...")
     try:
-        if analysis_type == "fast":
+        if analysis_type == "auto":
             res = await asyncio.get_event_loop().run_in_executor(None, fast_analyze, symbol)
         else:
-            res = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: analyze(symbol, ai_timeout=45.0, analysis_type=analysis_type)
-            )
+            res = await asyncio.get_event_loop().run_in_executor(None, lambda: analyze(symbol, analysis_type=analysis_type))
         if not res or len(res) < 4:
             await msg.edit_text(f"❌ فشل تحليل {symbol}")
             return
@@ -2078,7 +2155,7 @@ async def unknown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── MAIN ───
 # ─── WEB API FOR MONITOR ───
 import os
-API_PORT = int(os.environ.get("PORT", 5000))
+API_PORT = int(os.environ.get("PORT", 10993))
 
 class SignalAPIHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args): pass
@@ -2190,30 +2267,6 @@ class SignalAPIHandler(BaseHTTPRequestHandler):
         elif path == "/api/radar/conf_down":
             MIN_CONFIDENCE = max(20, MIN_CONFIDENCE-5)
             self._json({"ok":True, "min_confidence":MIN_CONFIDENCE})
-        elif path == "/api/radar/now":
-            def _run_radar_now():
-                logging.info("RadarNow: manual scan triggered")
-                for asset in RADAR_ASSETS:
-                    try:
-                        res = analyze(asset)
-                        if res and len(res) >= 4:
-                            confidence, rec, price = res[1], res[2], res[3]
-                            if confidence >= MIN_CONFIDENCE and rec not in ("WAIT", "انتظار") and price and price != "--":
-                                log_signal(asset, rec, confidence, price,
-                                    res[4] if len(res)>4 else "", res[5] if len(res)>5 else "",
-                                    res[6] if len(res)>6 else "", res[7] if len(res)>7 else "",
-                                    res[8] if len(res)>8 else "", res[9] if len(res)>9 else "",
-                                    res[10] if len(res)>10 else "", res[11] if len(res)>11 else "",
-                                    res[12] if len(res)>12 else "",
-                                    candle_patterns=res[13] if len(res)>13 else "",
-                                    vol_note=res[14] if len(res)>14 else "",
-                                    adx=res[15] if len(res)>15 else None,
-                                    session=res[16] if len(res)>16 else "")
-                    except Exception as e:
-                        logging.error(f"RadarNow: {asset} {e}")
-                logging.info("RadarNow: scan complete")
-            threading.Thread(target=_run_radar_now, daemon=True).start()
-            self._json({"ok": True, "message": "Radar scan started", "assets": len(RADAR_ASSETS)})
         elif path == "/api/radar/status":
             self._json({"ok":True, "radar_enabled":RADAR_ENABLED, "min_confidence":MIN_CONFIDENCE, "interval":RADAR_INTERVAL, "signals":len(signal_log)})
         elif len(parts) >= 4 and parts[1] == "api" and parts[2] == "analyze":
@@ -2414,21 +2467,28 @@ def main():
         logging.warning("API server may not be ready")
 
     logging.info(" AURA CLOUD V4")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    try:
+        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    finally:
+        try: app.stop()
+        except: pass
 
 if __name__ == "__main__":
+    restart_delay = 5
     while True:
         try:
-            try:
-                asyncio.get_event_loop().close()
-            except:
-                pass
+            try: asyncio.get_event_loop().close()
+            except: pass
             asyncio.set_event_loop(asyncio.new_event_loop())
             main()
+            restart_delay = 5
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as e:
-            logging.critical(f"CRASH: {e}\n{traceback.format_exc()}")
+            err = str(e).lower()
+            if "conflict" in err:
+                restart_delay = 15
+            logging.critical(f"CRASH [{restart_delay}s]: {e}\n{traceback.format_exc()}")
             import gc; gc.collect()
-            logging.info("Restarting in 5s...")
-            time.sleep(5)
+            time.sleep(restart_delay)
+            restart_delay = min(restart_delay + 5, 30)
